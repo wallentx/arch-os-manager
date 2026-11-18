@@ -1424,3 +1424,93 @@ msgstr "Fortschritt, Rückfragen als Dialog"
 
 msgid "terminal, every command and prompt"
 msgstr "Terminal, alle Befehle und Rückfragen"
+
+msgid "AUR check failed\nRefresh updates before trying again.\n"
+msgstr "AUR-Prüfung fehlgeschlagen\nDie Aktualisierungen vor einem neuen Versuch erneut abfragen.\n"
+
+msgid "AUR reports"
+msgstr "AUR-Prüfberichte"
+
+msgid "AUR screening is enabled\nSelect the AUR packages on the Update page.\n"
+msgstr "Die AUR-Sicherheitsprüfung ist aktiv\nDie AUR-Pakete auf der Aktualisierungsseite auswählen.\n"
+
+msgid "AUR selection changed\nRefresh updates and select the packages again.\n"
+msgstr "Die AUR-Auswahl hat sich geändert\nDie Aktualisierungen erneut abfragen und die Pakete neu auswählen.\n"
+
+msgid "AUR update screening (WTAKO)"
+msgstr "AUR-Sicherheitsprüfung (WTAKO)"
+
+msgid "AUR with findings"
+msgstr "AUR-Pakete mit Befunden"
+
+msgid "AUR with no findings"
+msgstr "AUR-Pakete ohne Befund"
+
+msgid "AUR without a current report"
+msgstr "AUR-Pakete ohne aktuellen Bericht"
+
+msgid "Candidate version"
+msgstr "Angebotene Version"
+
+msgid "Checking AUR security findings"
+msgstr "AUR-Sicherheitsbefunde werden abgefragt"
+
+msgid "Could not save decision"
+msgstr "Die Entscheidung konnte nicht gespeichert werden"
+
+msgid "Group"
+msgstr "Gruppe"
+
+msgid "Inspect AUR reports"
+msgstr "AUR-Prüfberichte ansehen"
+
+msgid "Install AUR updates with no findings"
+msgstr "AUR-Updates ohne Befund installieren"
+
+msgid "Install locally trusted AUR updates"
+msgstr "Lokal freigegebene AUR-Updates installieren"
+
+msgid "Locally trusted AUR updates"
+msgstr "Lokal freigegebene AUR-Updates"
+
+msgid "Official updates are pending\nInstall the official updates before updating selected AUR packages.\n"
+msgstr "Offizielle Updates stehen aus\nVor den ausgewählten AUR-Paketen die offiziellen Updates installieren.\n"
+
+msgid "Quarantine until findings clear"
+msgstr "Bis zur Entwarnung in Quarantäne halten"
+
+msgid "Quarantined AUR updates"
+msgstr "AUR-Updates in Quarantäne"
+
+msgid "Release from quarantine"
+msgstr "Aus der Quarantäne entlassen"
+
+msgid "Report version"
+msgstr "Geprüfte Version"
+
+msgid "Revoke trust"
+msgstr "Freigabe widerrufen"
+
+msgid "This update is no longer pending."
+msgstr "Dieses Update steht nicht mehr aus."
+
+msgid "Trust this version and its current findings"
+msgstr "Diese Version mit den aktuellen Befunden freigeben"
+
+msgid "Trust this version without a current report"
+msgstr "Diese Version ohne aktuellen Bericht freigeben"
+
+msgid "Update official packages and Flatpaks"
+msgstr "Offizielle Pakete und Flatpaks aktualisieren"
+
+msgid "AUR build metadata could not be verified\nRefresh updates before trying again.\n"
+msgstr "Die AUR-Baumetadaten konnten nicht bestätigt werden\nDie Aktualisierungen vor einem neuen Versuch erneut abfragen.\n"
+
+msgid "AUR updates share dependencies or a build\nKeep this group held until its prerequisites and split packages can be included.\n"
+msgstr "Die AUR-Updates haben gemeinsame Abhängigkeiten oder einen gemeinsamen Bauvorgang\nDiese Gruppe zurückhalten, bis ihre Abhängigkeiten und Teilpakete berücksichtigt werden können.\n"
+
+msgid "Install both eligible AUR groups"
+msgstr "Beide freigegebenen AUR-Gruppen installieren"
+
+msgid "Install this AUR update"
+msgstr "Dieses AUR-Update installieren"

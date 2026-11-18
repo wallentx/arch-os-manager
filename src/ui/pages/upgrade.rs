@@ -1,5 +1,7 @@
 //! What an update would bring, the news to read first, and the update itself.
 
+mod screening;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
@@ -117,9 +119,14 @@ impl UpgradePage {
         }
         if known_current {
             acts.push(recheck(ctx));
+        } else if ctx.settings.aur_screening {
+            acts.extend(screening::actions(ctx));
         } else {
             acts.push(
                 Act::new(t("Install now"), |ctx: &mut Ctx| {
+                    if ctx.settings.aur_screening {
+                        return Flow::Stay;
+                    }
                     Flow::Push(start(Job::new(op::UPGRADE_RUN, Vec::new()), ctx))
                 })
                 .icon(icon::UPDATE),
@@ -221,17 +228,21 @@ fn sections(ctx: &Ctx, query: &str) -> Vec<Block> {
     let change = changes(&pairs, ctx.style.glyphs.arrow);
     let shown = labels(list);
     let mut body = Vec::new();
-    for (source, heading, glyph) in [
-        (Source::Repo, t("Official packages"), icon::PACKAGE),
-        (Source::Aur, "AUR", icon::ARCH),
-        (Source::Flatpak, "Flatpak", icon::APP),
-    ] {
+    let mut groups = vec![(Source::Repo, t("Official packages"), icon::PACKAGE, None)];
+    if ctx.settings.aur_screening {
+        groups.extend(screening::Group::ALL.map(|g| (Source::Aur, g.label(), icon::ARCH, Some(g))));
+    } else {
+        groups.push((Source::Aur, "AUR", icon::ARCH, None));
+    }
+    groups.push((Source::Flatpak, "Flatpak", icon::APP, None));
+    for (source, heading, glyph, group) in groups {
         let part: Vec<_> = list
             .iter()
             .zip(&change)
             .zip(&shown)
             .filter(|((u, _), label)| {
                 u.source == source
+                    && group.is_none_or(|g| g == screening::group(ctx, pending, u))
                     && [&u.name, *label]
                         .iter()
                         .any(|s| s.to_lowercase().contains(query))

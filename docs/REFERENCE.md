@@ -64,7 +64,7 @@ A run shows its step and pacman's progress. **tab** switches to the details: the
 
 Another prompt opens the details once its line stands still for a second and ends in `?`, `:` or `>`, and closes them with the answer. pacman's `Proceed with installation?`, `Proceed with download?` and `Do you want to remove these packages?` are confirmed before the run. Conflicts, replacements and keys are always asked. With `aur-review`, the details show while the AUR helper runs and every question goes to the person.
 
-An update runs the repositories, the AUR, then Flatpak. A failed AUR helper does not stop Flatpak. One that no longer starts, as after a pacman update, fails the AUR until it is rebuilt. Installs and removals share one run, installs first. An install is refused while the package lists are newer than the system, as after an update that broke off. The update page names foreign packages the AUR does not know, as no update reaches them. It shows a Flatpak by the name Flatpak gives it, with its branch where two share that name, by its id where two share both.
+With the default settings, an update runs the repositories, the AUR, then Flatpak. A failed AUR helper does not stop Flatpak. One that no longer starts, as after a pacman update, fails the AUR until it is rebuilt. Installs and removals share one run, installs first. An install is refused while the package lists are newer than the system, as after an update that broke off. The update page names foreign packages the AUR does not know, as no update reaches them. It shows a Flatpak by the name Flatpak gives it, with its branch where two share that name, by its id where two share both.
 
 **esc**, **q** and **ctrl+c** ask to stop, in the details only **ctrl+c**. Yes sends ctrl+c, repeated as an interrupt after 5 s and as a hang-up after 10 s, never as terminate or kill, which pacman does not catch. A terminal handed over gets the interrupt and the hang-up at once. A run stopped this way ends as Stopped, not as failed. Asked again while it stops, the question is whether to leave, and the run ends in the background. A run that elevates holds off shutdown and sleep, a closed terminal does not stop it. In a terminal handed over, as for the mirror list or an AUR review, every key goes to the program, **tab** included.
 
@@ -76,7 +76,23 @@ An update runs the repositories, the AUR, then Flatpak. A failed AUR helper does
 | Clean up | Marked unneeded packages or 1 GiB in marked parts, not after a clean-up |
 | Update | Updates are pending, not after an update |
 
-Back after a success also closes the page the action came from.
+Back after a successful run also closes the page the action came from. After a screened update, Back returns to the Update page so you can choose another group.
+
+### AUR update screening
+
+**Settings › AUR update screening (WTAKO)** enables security reports on the Update page. When enabled, the manager sends the names of pending AUR updates to WTAKO. **Inspect AUR reports** shows the candidate version, the highest flag color, each finding, and the address of the provider's report. WTAKO uses black, red, and yellow flags. A completed report with no flags applies to the package name and version WTAKO assessed. The API does not identify the exact recipe commit. [WTAKO API documentation](https://wtako.net/services/aur-audit/docs)
+
+| Update group | How the manager handles it |
+|---|---|
+| AUR with no findings | You can install these updates together. |
+| AUR with findings | Open a report to review the flags. You can trust that version with those findings or keep it in quarantine. |
+| AUR without a current report | The scanner may be offline, lack the package, or have assessed another version. You can explicitly trust a version after your own review. |
+| Quarantined AUR updates | The manager holds the package across launches and version changes until a matching report has no findings or you release it. Releasing it returns it to the group its report indicates. |
+| Locally trusted AUR updates | You can install these separately or revoke trust from the report. The exception applies to the recorded version and assessment. |
+
+Install pending official updates first. You can install one eligible package from its report, either eligible group on its own, or both groups together. Before a screened AUR run, the manager checks the reports and local decisions again, verifies the offered versions, and asks the helper for explicit targets. When some pending packages are left out, the manager also checks for shared builds and missing prerequisites that could pull them in. A blocked group requires another review after the dependency or package state changes.
+
+Screening applies to pending updates on the Update page. New packages, newly introduced dependencies, helper rebuilds, and transactions started outside this page have their usual package-manager behavior. The separate **AUR review** setting lets you inspect the recipe during the build workflow.
 
 <img src="screenshots/done.png" width="720" alt="The end of an update: what may follow, each with its reason">
 
@@ -162,6 +178,7 @@ A package counts when its `command` in `scripts/features/features.yaml` works. O
 | `status` | `true`, `false` | `true` |
 | `aur-helper` | `paru`, `yay`, `none` | paru, else yay |
 | `aur-review` | `true`, `false` | `true` |
+| `aur-screening` | `true`, `false` | `false` |
 | `output` | `compact`, `verbose` | `compact` |
 | `app-menu` | `true`, `false` | `true` |
 | `notify` | `hourly`, `daily`, `weekly`, `off` | `hourly` |
@@ -296,6 +313,7 @@ Every text is English and translated in `locales/de.po`.
 |---|---|
 | `LC_ALL` | `C.UTF-8`, one known wording |
 | `SM_AUR` | AUR helper, empty for none |
+| `SM_AUR_SCREENING` | `on` requires an explicit selection for AUR updates |
 | `SM_AUR_REVIEW` | `off` builds without the helper's review, else with it |
 | `SM_FLATPAK` | `on` where Flatpak is installed and enabled, else `off` |
 | `SM_MIRRORLIST` | The mirror list, `/etc/pacman.d/mirrorlist` unless set, for tests |

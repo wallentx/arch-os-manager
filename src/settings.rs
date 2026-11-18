@@ -24,6 +24,9 @@ pub struct Settings {
     /// The AUR helper's review before it builds, on unless switched off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aur_review: Option<bool>,
+    /// Send pending AUR update names to WTAKO for version-specific screening.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub aur_screening: bool,
     /// How a run shows, one of `OUTPUT`, compact unless chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
@@ -220,6 +223,7 @@ mod tests {
             status: Some(false),
             aur_helper: Some("yay".into()),
             aur_review: Some(false),
+            aur_screening: true,
             output: Some("verbose".into()),
             app_menu: Some(false),
             notify: Some("daily".into()),

@@ -314,12 +314,19 @@ impl App {
                 }
             };
         }
+        let screening = ctx.settings.aur_screening;
         gated!(
             updates,
             op::UPGRADE_LIST,
             remote,
             Updates,
-            query(op::UPGRADE_LIST, &[]).map(|o| data::updates::parse(&o))
+            query(op::UPGRADE_LIST, &[]).map(|o| {
+                let mut pending = data::updates::parse(&o);
+                if screening {
+                    pending.screens = data::screening::lookup(&pending.updates);
+                }
+                pending
+            })
         );
         gated!(
             pacnew,
@@ -370,6 +377,12 @@ impl App {
             }
             Fresh::System(r) => s.system = Loaded::from(r),
             Fresh::Updates(r) => {
+                if self.ctx.settings.aur_screening
+                    && script::aur().is_some()
+                    && let Ok(pending) = &r
+                {
+                    self.ctx.state.refresh_aur_decisions(pending);
+                }
                 s.updates = Loaded::from(r);
                 // Installed, here or elsewhere: a notification still about them goes.
                 if s.updates

@@ -180,6 +180,7 @@ pub fn configure(
     settings: &crate::settings::Settings,
     features: Option<&crate::data::features::Features>,
 ) {
+    AUR_SCREENING.store(settings.aur_screening, Ordering::Relaxed);
     set_terminal(settings.terminal());
     set_aur_review(settings.aur_review.unwrap_or(true));
     if let Some(features) = features {
@@ -199,6 +200,8 @@ pub fn aur() -> Option<String> {
     let helper = AUR.lock().unwrap().clone();
     (!helper.is_empty()).then_some(helper)
 }
+
+static AUR_SCREENING: AtomicBool = AtomicBool::new(false);
 
 static AUR_REVIEW: Mutex<&str> = Mutex::new("on");
 
@@ -269,6 +272,14 @@ fn command(op: Op, args: &[String]) -> Result<Command, String> {
         .args(args);
     cmd.env("LC_ALL", "C.UTF-8")
         .env("SM_AUR", AUR.lock().unwrap().as_str())
+        .env(
+            "SM_AUR_SCREENING",
+            if AUR_SCREENING.load(Ordering::Relaxed) {
+                "on"
+            } else {
+                "off"
+            },
+        )
         .env("SM_AUR_REVIEW", *AUR_REVIEW.lock().unwrap())
         .env("SM_FLATPAK", *FLATPAK.lock().unwrap())
         .env("SUDO_PROMPT", sudo::PROMPT)

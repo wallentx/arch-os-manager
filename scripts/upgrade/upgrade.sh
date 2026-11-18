@@ -91,14 +91,136 @@ op_idle() {
     esac
 }
 
+# Scanner answers are data. Names remain a single encoded query parameter.
+op_audit() {
+    [[ $# == 1 && $1 =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*(,[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*)*$ ]] || exit 14
+    curl --disable --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+        --connect-timeout 3 --max-time 7 --max-filesize 2097152 \
+        --get --data-urlencode "names=$1" https://aur-audit.wtako.net/package-analysis
+}
+
+# The selected names and versions are rechecked immediately before installation.
+# Equality constraints keep a changed version from satisfying a selected target.
+# Pass other pending updates through the helper's ignore option. Its dependency
+# resolver still controls additional builds, so this selects update targets only.
+screened() {
+    local name version base pending status=0 old arrow new rest
+    local -A selected=() available=() bases=() pending_names=() selected_bases=()
+    local -a targets=() ignored=()
+    (($# > 0 && $# % 3 == 0)) || exit 14
+    while (($#)); do
+        name=$1 version=$2 base=$3
+        [[ $name =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$ &&
+            $base =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$ &&
+            $version =~ ^[a-zA-Z0-9._+:~\-]+$ && ! -v selected[$name] ]] || exit 14
+        [[ ! -v bases[$base] || ${bases[$base]} == "$version" ]] || exit 14
+        selected["$name"]=$version
+        selected_bases["$name"]=$base
+        bases["$base"]=$version
+        targets+=("aur/$name=$version")
+        shift 3
+    done
+    [[ -n $SM_AUR ]] || exit 17
+    pending=$(flock --wait 100 "${TMPDIR:-/tmp}/checkup-db-${UID}.lock" checkupdates) || status=$?
+    case $status in
+    0) exit 15 ;;
+    2) [[ -z $pending ]] || exit 15 ;;
+    *) exit 10 ;;
+    esac
+    scratch
+    status=0
+    pending=$(aur -Qua 2>"$work/errors") || status=$?
+    if ((status > 1)) || [[ -s $work/errors ]]; then
+        cat "$work/errors" >&2
+        exit 17
+    fi
+    while read -r name old arrow new rest; do
+        [[ -n $name ]] || continue
+        [[ $name =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$ && $arrow == '->' && -n $new ]] || exit 17
+        pending_names["$name"]=1
+        if [[ $rest == *'[ignored]'* ]]; then
+            ignored+=(--ignore "$name")
+        elif [[ -v selected[$name] ]]; then
+            available["$name"]=$new
+        else
+            ignored+=(--ignore "$name")
+        fi
+    done <<<"$pending"
+    for name in "${!selected[@]}"; do
+        [[ ${available[$name]-} == "${selected[$name]}" ]] || exit 14
+    done
+    # Shared builds can include held split packages. When updates are held,
+    # require prerequisites to be installed already before asking the helper
+    # to resolve dependencies for the selected transaction.
+    local metadata field equals value pkgver pkgrel epoch current actual_base arch missing
+    local -a dependencies=()
+    local -A seen=()
+    arch=$(uname -m)
+    for base in "${!bases[@]}"; do
+        metadata=$(curl --disable --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+            --connect-timeout 3 --max-time 7 --max-filesize 2097152 \
+            --get --data-urlencode "h=$base" https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO) || exit 19
+        pkgver='' pkgrel='' epoch='' current='' actual_base=''
+        while read -r field equals value; do
+            [[ $equals == '=' ]] || continue
+            case $field in
+            pkgbase) actual_base=$value ;;
+            pkgver) pkgver=$value ;;
+            pkgrel) pkgrel=$value ;;
+            epoch) epoch=$value ;;
+            pkgname)
+                [[ $value =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$ ]] || exit 19
+                current=$value
+                if [[ -v pending_names[$current] && ! -v selected[$current] ]]; then exit 18; fi
+                if [[ -v selected[$current] && ${selected_bases[$current]} != "$base" ]]; then exit 19; fi
+                seen["$current"]=1
+                ;;
+            depends | makedepends | checkdepends | "depends_$arch" | "makedepends_$arch" | "checkdepends_$arch")
+                if [[ -z $current || -v selected[$current] ]]; then
+                    [[ $value =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+:~\<\>\=\-]*$ ]] || exit 19
+                    dependencies+=("$value")
+                fi
+                ;;
+            esac
+        done <<<"$metadata"
+        [[ $actual_base == "$base" && -n $pkgver && -n $pkgrel ]] || exit 19
+        version=$pkgver-$pkgrel
+        [[ -z $epoch || $epoch == 0 ]] || version=$epoch:$version
+        [[ $version == "${bases[$base]}" ]] || exit 14
+    done
+    for name in "${!selected[@]}"; do
+        [[ -v seen[$name] ]] || exit 19
+    done
+    if ((${#ignored[@]} && ${#dependencies[@]})); then
+        status=0
+        missing=$(pacman -T -- "${dependencies[@]}") || status=$?
+        [[ $status == 0 && -z $missing ]] || exit 18
+    fi
+    step aur
+    aur_sync -S "${ignored[@]}" -- "${targets[@]}"
+}
+
 # Repositories first, then what is built on top of them. A failing AUR helper
 # leaves Flatpak still to update. It also fails where nothing is left to do and
 # the AUR is out of reach, so what it left decides the end.
 op_run() {
-    local aur=0 yes
+    local aur=0 yes mode=${1:-all}
+    case $mode in
+    screened)
+        shift
+        screened "$@"
+        return
+        ;;
+    system) [[ $# == 1 ]] || exit 14 ;;
+    all)
+        [[ $# == 0 ]] || exit 14
+        [[ ${SM_AUR_SCREENING:-off} != on ]] || exit 16
+        ;;
+    *) exit 14 ;;
+    esac
     step repo
     sudo pacman -Syu
-    if [ -n "$SM_AUR" ]; then
+    if [[ $mode == all && -n $SM_AUR ]]; then
         step aur
         aur_sync -Sua || aur=$?
     fi

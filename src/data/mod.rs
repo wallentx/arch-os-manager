@@ -9,6 +9,7 @@ pub mod journal;
 pub mod mirrors;
 pub mod news;
 pub mod packages;
+pub mod screening;
 pub mod services;
 pub mod system;
 pub mod updates;

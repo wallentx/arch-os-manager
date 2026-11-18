@@ -727,6 +727,181 @@ fn upgrade_takes_the_repositories_first_then_the_aur_then_flatpak() {
     );
 }
 
+#[test]
+fn screened_upgrades_only_request_selected_versions_and_ignore_other_pending_packages() {
+    let s = Sandbox::new("screened-upgrade");
+    s.stub("checkupdates", "exit 2");
+    s.stub(
+        "curl",
+        "printf '%s\\n' 'pkgbase = good' 'pkgver = 2' 'pkgrel = 1' 'pkgname = good'",
+    );
+    for helper in ["paru", "yay"] {
+        s.stub(helper, r#"if [[ $1 == -Qua ]]; then printf '%s\n' 'good 1-1 -> 2-1' 'held 1-1 -> 3-1' 'ignored 1-1 -> 4-1 [ignored]'; fi"#);
+        let _ = std::fs::remove_file(s.dir.join("calls"));
+        let o = s.run(
+            "upgrade",
+            &["run", "screened", "good", "2-1", "good"],
+            &[("SM_AUR", helper), ("SM_AUR_SCREENING", "on")],
+        );
+        assert_eq!(o.code, 0, "{}{}", o.events, o.err);
+        assert!(
+            o.calls.ends_with(&format!(
+                "{helper} -S --ignore held --ignore ignored -- aur/good=2-1\n"
+            )),
+            "{}",
+            o.calls
+        );
+        assert!(!o.calls.contains("-Sua"));
+        assert!(!o.calls.contains("pacman"));
+        assert_eq!(o.events, "step\taur\nterminal\ton\nterminal\toff\n");
+    }
+}
+
+#[test]
+fn screened_upgrades_refuse_invalid_stale_or_unavailable_selections_before_installing() {
+    let s = Sandbox::new("screened-refusal");
+    let env = [("SM_AUR", "paru"), ("SM_AUR_SCREENING", "on")];
+    s.stub("checkupdates", "exit 2");
+    s.stub(
+        "paru",
+        "printf '%s\n' 'good 1-1 -> 2-1' 'held 1-1 -> 3-1 [ignored]'",
+    );
+    for args in [
+        vec!["run", "screened"],
+        vec!["run", "screened", "good"],
+        vec!["run", "screened", "good", "1-1", "good"],
+        vec!["run", "screened", "gone", "2-1", "gone"],
+        vec!["run", "screened", "held", "3-1", "held"],
+        vec![
+            "run", "screened", "good", "2-1", "good", "good", "2-1", "good",
+        ],
+        vec!["run", "screened", "--help", "2-1", "good"],
+        vec!["run", "screened", "good bad", "2-1", "good"],
+        vec!["run", "screened", "good", "2*", "good"],
+    ] {
+        let _ = std::fs::remove_file(s.dir.join("calls"));
+        let o = s.run("upgrade", &args, &env);
+        assert_eq!(o.code, 14, "{args:?}: {}{}", o.events, o.err);
+        assert!(!o.calls.contains(" -S"), "{}", o.calls);
+    }
+    for (check, helper, code) in [
+        ("echo 'linux 1 -> 2'", "exit 0", 15),
+        ("exit 1", "exit 0", 10),
+        ("exit 2", "echo failed >&2; exit 1", 17),
+        ("exit 2", "exit 127", 17),
+        ("exit 2", "echo malformed", 17),
+        ("exit 2", "exit 1", 14),
+    ] {
+        s.stub("checkupdates", check);
+        s.stub("paru", helper);
+        let _ = std::fs::remove_file(s.dir.join("calls"));
+        let o = s.run("upgrade", &["run", "screened", "good", "2-1", "good"], &env);
+        assert_eq!(o.code, code, "{check} / {helper}: {}{}", o.events, o.err);
+        assert!(!o.calls.contains(" -S"), "{}", o.calls);
+    }
+}
+
+#[test]
+fn screening_requires_explicit_aur_selection_and_system_updates_skip_the_helper() {
+    let s = Sandbox::new("screened-system");
+    for command in ["pacman", "flatpak", "paru"] {
+        s.stub(command, "exit 0");
+    }
+    let env = [
+        ("SM_AUR", "paru"),
+        ("SM_AUR_SCREENING", "on"),
+        ("SM_FLATPAK", "on"),
+    ];
+    let o = s.run("upgrade", &["run"], &env);
+    assert_eq!(o.code, 16);
+    assert!(o.calls.is_empty());
+    let o = s.run("upgrade", &["run", "system"], &env);
+    assert_eq!(o.code, 0, "{}", o.events);
+    assert!(o.calls.contains("pacman -Syu\n"));
+    assert!(
+        o.calls
+            .contains("flatpak update --assumeyes --noninteractive\n")
+    );
+    assert!(!o.calls.contains("paru"));
+}
+
+#[test]
+fn screened_updates_check_build_metadata_and_dependencies_before_running_the_helper() {
+    let s = Sandbox::new("screened-dependencies");
+    s.stub("checkupdates", "exit 2");
+    s.stub("uname", "printf '%s\n' x86_64");
+    s.stub(
+        "paru",
+        r#"if [[ $1 == -Qua ]]; then printf '%s\n' 'good 1-1 -> 2-1' 'held 1-1 -> 3-1'; fi"#,
+    );
+    s.stub("pacman", "exit 0");
+    let file = s.dir.join("srcinfo");
+    s.stub("curl", &format!("cat '{}'", file.display()));
+    let metadata = "pkgbase = good\n pkgver = 2\n pkgrel = 1\n makedepends = builder>=1\n checkdepends = checker\n depends_aarch64 = otherarch\npkgname = good\n depends = held>=1\n depends_x86_64 = native\n";
+    std::fs::write(&file, metadata).unwrap();
+    let run = || {
+        s.run(
+            "upgrade",
+            &["run", "screened", "good", "2-1", "good"],
+            &[("SM_AUR", "paru")],
+        )
+    };
+    let o = run();
+    assert_eq!(o.code, 0, "{}{}", o.events, o.err);
+    assert!(
+        o.calls
+            .contains("pacman -T -- builder>=1 checker held>=1 native\n"),
+        "{}",
+        o.calls
+    );
+    assert!(!o.calls.contains("otherarch"));
+    for (srcinfo, pacman, code) in [
+        (metadata.to_string(), "echo 'held>=1'; exit 127", 18),
+        (format!("{metadata}pkgname = held\n"), "exit 0", 18),
+        (metadata.replace("pkgver = 2", "pkgver = 3"), "exit 0", 14),
+        (
+            metadata.replace("pkgbase = good", "pkgbase = wrong"),
+            "exit 0",
+            19,
+        ),
+        (
+            metadata.replace("pkgname = good", "pkgname = wrong"),
+            "exit 0",
+            19,
+        ),
+        (String::new(), "exit 0", 19),
+    ] {
+        std::fs::write(&file, srcinfo).unwrap();
+        s.stub("pacman", pacman);
+        let _ = std::fs::remove_file(s.dir.join("calls"));
+        let o = run();
+        assert_eq!(o.code, code, "{}{}", o.events, o.err);
+        assert!(!o.calls.contains("paru -S"), "{}", o.calls);
+    }
+    s.stub("curl", "exit 22");
+    assert_eq!(run().code, 19);
+}
+
+#[test]
+fn aur_audit_encodes_valid_names_and_bounds_the_request() {
+    let s = Sandbox::new("aur-audit");
+    s.stub("curl", "printf '%s\n' '[]'");
+    let o = s.run("upgrade", &["audit", "foo,bar-bin"], &[]);
+    assert_eq!(o.code, 0, "{}", o.events);
+    assert_eq!(o.out, "[]\n");
+    assert!(o.calls.starts_with("curl --disable "));
+    assert!(o.calls.contains("--max-time 7 --max-filesize 2097152"));
+    assert!(o.calls.contains(
+        "--get --data-urlencode names=foo,bar-bin https://aur-audit.wtako.net/package-analysis"
+    ));
+    for names in ["", "foo,", "foo bar", "--help", "foo/../../", "foo\nbar"] {
+        let _ = std::fs::remove_file(s.dir.join("calls"));
+        let o = s.run("upgrade", &["audit", names], &[]);
+        assert_eq!(o.code, 14, "{names:?}");
+        assert!(o.calls.is_empty());
+    }
+}
+
 /// The helper also fails where nothing is left to do and the AUR is out of reach, so what it left
 /// decides the end.
 #[test]

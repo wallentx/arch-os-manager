@@ -70,6 +70,10 @@ impl SettingsPage {
                 let (text, tone) = on_off(ctx.settings.flatpak.unwrap_or(true));
                 (text.into(), tone, false)
             }
+            Target::AurScreening => {
+                let (text, tone) = on_off(ctx.settings.aur_screening);
+                (text.into(), tone, false)
+            }
             Target::AurReview => {
                 let (text, tone) = on_off(ctx.settings.aur_review.unwrap_or(true));
                 (text.into(), tone, false)
@@ -171,7 +175,7 @@ impl Page for SettingsPage {
         let aur = script::aur().is_some();
         let shown = |t: Target| match t {
             Target::Flatpak => flatpak,
-            Target::AurReview => aur,
+            Target::AurReview | Target::AurScreening => aur,
             _ => true,
         };
         let mut rows = Vec::new();
@@ -263,6 +267,13 @@ impl Page for SettingsPage {
                 ctx.settings.flatpak = crate::settings::switch(on);
                 script::configure(&ctx.settings, ctx.features());
                 ctx.reload();
+                ctx.save_settings();
+                Flow::Stay
+            }
+            Target::AurScreening => {
+                ctx.settings.aur_screening = !ctx.settings.aur_screening;
+                script::configure(&ctx.settings, ctx.features());
+                ctx.recheck();
                 ctx.save_settings();
                 Flow::Stay
             }

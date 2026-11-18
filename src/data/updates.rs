@@ -25,6 +25,7 @@ pub struct Update {
 pub struct Pending {
     pub updates: Vec<Update>,
     pub failed: Vec<Source>,
+    pub screens: std::collections::BTreeMap<String, super::screening::Report>,
 }
 
 pub fn parse(out: &str) -> Pending {
