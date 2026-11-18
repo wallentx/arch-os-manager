@@ -1514,3 +1514,9 @@ msgstr "Beide freigegebenen AUR-Gruppen installieren"
 
 msgid "Install this AUR update"
 msgstr "Dieses AUR-Update installieren"
+
+msgid "Split package selection is incomplete\nThe helper builds this recipe as a group. Every output must be selected.\n"
+msgstr "Die Auswahl der Teilpakete ist unvollständig\nDer Helfer baut dieses Rezept als Gruppe. Alle Teilpakete müssen ausgewählt sein.\n"
+
+msgid "AUR update canceled\n"
+msgstr "AUR-Aktualisierung abgebrochen\n"

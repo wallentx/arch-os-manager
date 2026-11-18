@@ -90,9 +90,11 @@ Back after a successful run also closes the page the action came from. After a s
 | Quarantined AUR updates | The manager holds the package across launches and version changes until a matching report has no findings or you release it. Releasing it returns it to the group its report indicates. |
 | Locally trusted AUR updates | You can install these separately or revoke trust from the report. The exception applies to the recorded version and assessment. |
 
-Install pending official updates first. You can install one eligible package from its report, either eligible group on its own, or both groups together. Before a screened AUR run, the manager checks the reports and local decisions again, verifies the offered versions, and asks the helper for explicit targets. When some pending packages are left out, the manager also checks for shared builds and missing prerequisites that could pull them in. A blocked group requires another review after the dependency or package state changes.
+Install pending official updates first. You can install one eligible package from its report, either eligible group on its own, or both groups together. The manager checks the reports and local decisions again, clones each selected recipe into a temporary directory, and verifies its name and version there. Yay or Paru builds those same directories with `-Bi`. The checkout stays at the verified commit during the run. A recipe that computes its version with `pkgver()` can still produce a different version from a moving source.
 
-Screening applies to pending updates on the Update page. New packages, newly introduced dependencies, helper rebuilds, and transactions started outside this page have their usual package-manager behavior. The separate **AUR review** setting lets you inspect the recipe during the build workflow.
+A local build can install every output of a split recipe. The manager therefore requires the selection to include every output listed in that recipe. When the selection leaves out a pending update, installed packages or selected updates must satisfy the build prerequisites. Selected packages can satisfy a prerequisite by name or through a virtual package they provide, subject to its version constraint.
+
+Screening applies to pending updates on the Update page. New packages, newly introduced dependencies, helper rebuilds, and transactions started outside this page have their usual package-manager behavior. With **AUR review** or verbose output enabled, the manager shows the checked-out recipes and asks for confirmation before passing them to the helper.
 
 <img src="screenshots/done.png" width="720" alt="The end of an update: what may follow, each with its reason">
 

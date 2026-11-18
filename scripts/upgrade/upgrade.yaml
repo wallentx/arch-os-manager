@@ -43,6 +43,11 @@ errors:
   19: |
     AUR build metadata could not be verified
     Refresh updates before trying again.
+  20: |
+    Split package selection is incomplete
+    The helper builds this recipe as a group. Every output must be selected.
+  21: |
+    AUR update canceled
 declined:
   11: |
     AUR update canceled

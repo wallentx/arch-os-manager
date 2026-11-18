@@ -727,34 +727,143 @@ fn upgrade_takes_the_repositories_first_then_the_aur_then_flatpak() {
     );
 }
 
+/// Redirect the AUR Git transport to disposable repositories. Clones, upstream
+/// tracking and refreshes still use Git, including when the fixture advances.
+fn local_aur(s: &Sandbox) {
+    s.stub("git", r#"remote="file://${0%/bin/git}/"
+exec /usr/bin/git -c protocol.file.allow=always -c "url.$remote.insteadOf=https://aur.archlinux.org/" "$@""#);
+}
+
+fn recipe(s: &Sandbox, base: &str, metadata: &str) {
+    let repo = s.dir.join(format!("{base}.git"));
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let result = Command::new("git")
+            .current_dir(&repo)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=test@example.org",
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "master"]);
+    std::fs::write(repo.join(".SRCINFO"), metadata).unwrap();
+    std::fs::write(repo.join("PKGBUILD"), format!("# {base} build fixture\n")).unwrap();
+    git(&["add", "--", ".SRCINFO", "PKGBUILD"]);
+    git(&["commit", "-qm", "fixture", "--allow-empty"]);
+}
+
 #[test]
-fn screened_upgrades_only_request_selected_versions_and_ignore_other_pending_packages() {
-    let s = Sandbox::new("screened-upgrade");
-    s.stub("checkupdates", "exit 2");
-    s.stub(
-        "curl",
-        "printf '%s\\n' 'pkgbase = good' 'pkgver = 2' 'pkgrel = 1' 'pkgname = good'",
-    );
+fn screened_helpers_build_the_checked_recipe_even_if_upstream_advances() {
     for helper in ["paru", "yay"] {
-        s.stub(helper, r#"if [[ $1 == -Qua ]]; then printf '%s\n' 'good 1-1 -> 2-1' 'held 1-1 -> 3-1' 'ignored 1-1 -> 4-1 [ignored]'; fi"#);
-        let _ = std::fs::remove_file(s.dir.join("calls"));
+        let s = Sandbox::new(&format!("screened-upgrade-{helper}"));
+        local_aur(&s);
+        recipe(
+            &s,
+            "good",
+            "pkgbase = good\npkgver = 2\npkgrel = 1\npkgname = good\n",
+        );
+        s.stub("checkupdates", "exit 2");
+        s.stub(helper, r#"set -eu
+if [[ $1 == -Qua ]]; then
+    printf '%s\n' 'good 1-1 -> 2-1' 'held 1-1 -> 3-1' 'ignored 1-1 -> 4-1 [ignored]'
+    exit 0
+fi
+repo="${0%/bin/*}/good.git"
+printf '# newer recipe\n' > "$repo/PKGBUILD"
+git -C "$repo" -c user.name=Fixture -c user.email=test@example.org -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qam advanced
+dir=${!#}
+git -C "$dir" pull --ff-only
+[[ $(<"$dir/PKGBUILD") == '# good build fixture' ]]
+[[ $(git -C "$dir" rev-parse HEAD) != "$(git -C "$repo" rev-parse HEAD)" ]]
+"#);
         let o = s.run(
             "upgrade",
             &["run", "screened", "good", "2-1", "good"],
-            &[("SM_AUR", helper), ("SM_AUR_SCREENING", "on")],
+            &[
+                ("SM_AUR", helper),
+                ("SM_AUR_REVIEW", "off"),
+                ("SM_AUR_SCREENING", "on"),
+            ],
         );
         assert_eq!(o.code, 0, "{}{}", o.events, o.err);
+        let invocation = o
+            .calls
+            .lines()
+            .find(|line| line.starts_with(helper) && line.contains(" -Bi "))
+            .unwrap();
         assert!(
-            o.calls.ends_with(&format!(
-                "{helper} -S --ignore held --ignore ignored -- aur/good=2-1\n"
-            )),
-            "{}",
-            o.calls
+            invocation.contains(" -Bi --ignore held --ignore ignored -- "),
+            "{invocation}"
         );
+        assert!(invocation.ends_with("/recipes/good"), "{invocation}");
         assert!(!o.calls.contains("-Sua"));
-        assert!(!o.calls.contains("pacman"));
-        assert_eq!(o.events, "step\taur\nterminal\ton\nterminal\toff\n");
+        assert_eq!(o.events, "step\taur\n");
     }
+}
+
+#[test]
+fn screened_group_supplies_another_selected_packages_prerequisites() {
+    let s = Sandbox::new("screened-group-provides");
+    local_aur(&s);
+    recipe(
+        &s,
+        "app",
+        "pkgbase = app\npkgver = 2\npkgrel = 1\ndepends = lib>=2\nmakedepends = virtual-tool>=3\npkgname = app\n",
+    );
+    recipe(
+        &s,
+        "lib",
+        "pkgbase = lib\npkgver = 2\npkgrel = 1\npkgname = lib\nprovides = virtual-tool=3\n",
+    );
+    s.stub("checkupdates", "exit 2");
+    s.stub("paru", r#"if [[ $1 == -Qua ]]; then printf '%s\n' 'app 1-1 -> 2-1' 'lib 1-1 -> 2-1' 'held 1-1 -> 2-1'; fi"#);
+    s.stub(
+        "pacman",
+        r#"[[ $1 == -T ]] || exit 1; printf '%s\n' "${@:3}"; exit 127"#,
+    );
+    let run = |review| {
+        s.run(
+            "upgrade",
+            &["run", "screened", "app", "2-1", "app", "lib", "2-1", "lib"],
+            &[("SM_AUR", "paru"), ("SM_AUR_REVIEW", review)],
+        )
+    };
+    let o = run("on");
+    assert_eq!(o.code, 21, "{}{}", o.events, o.err);
+    assert!(o.out.contains("Build the displayed AUR recipes?"));
+    assert!(!o.calls.contains(" -Bi "));
+    let o = run("off");
+    assert_eq!(o.code, 0, "{}{}", o.events, o.err);
+    let invocation = o.calls.lines().find(|line| line.contains(" -Bi ")).unwrap();
+    assert!(invocation.contains("--ignore held --"));
+    for name in ["lib", "app"] {
+        assert!(
+            invocation
+                .split_whitespace()
+                .any(|p| p.ends_with(&format!("/recipes/{name}"))),
+            "{invocation}"
+        );
+    }
+    recipe(
+        &s,
+        "lib",
+        "pkgbase = lib\npkgver = 2\npkgrel = 1\npkgname = lib\nprovides = virtual-tool=2\n",
+    );
+    assert_eq!(run("off").code, 18);
 }
 
 #[test]
@@ -835,15 +944,14 @@ fn screened_updates_check_build_metadata_and_dependencies_before_running_the_hel
         r#"if [[ $1 == -Qua ]]; then printf '%s\n' 'good 1-1 -> 2-1' 'held 1-1 -> 3-1'; fi"#,
     );
     s.stub("pacman", "exit 0");
-    let file = s.dir.join("srcinfo");
-    s.stub("curl", &format!("cat '{}'", file.display()));
+    local_aur(&s);
     let metadata = "pkgbase = good\n pkgver = 2\n pkgrel = 1\n makedepends = builder>=1\n checkdepends = checker\n depends_aarch64 = otherarch\npkgname = good\n depends = held>=1\n depends_x86_64 = native\n";
-    std::fs::write(&file, metadata).unwrap();
+    recipe(&s, "good", metadata);
     let run = || {
         s.run(
             "upgrade",
             &["run", "screened", "good", "2-1", "good"],
-            &[("SM_AUR", "paru")],
+            &[("SM_AUR", "paru"), ("SM_AUR_REVIEW", "off")],
         )
     };
     let o = run();
@@ -857,7 +965,7 @@ fn screened_updates_check_build_metadata_and_dependencies_before_running_the_hel
     assert!(!o.calls.contains("otherarch"));
     for (srcinfo, pacman, code) in [
         (metadata.to_string(), "echo 'held>=1'; exit 127", 18),
-        (format!("{metadata}pkgname = held\n"), "exit 0", 18),
+        (format!("{metadata}pkgname = held\n"), "exit 0", 20),
         (metadata.replace("pkgver = 2", "pkgver = 3"), "exit 0", 14),
         (
             metadata.replace("pkgbase = good", "pkgbase = wrong"),
@@ -871,14 +979,14 @@ fn screened_updates_check_build_metadata_and_dependencies_before_running_the_hel
         ),
         (String::new(), "exit 0", 19),
     ] {
-        std::fs::write(&file, srcinfo).unwrap();
+        recipe(&s, "good", &srcinfo);
         s.stub("pacman", pacman);
         let _ = std::fs::remove_file(s.dir.join("calls"));
         let o = run();
         assert_eq!(o.code, code, "{}{}", o.events, o.err);
-        assert!(!o.calls.contains("paru -S"), "{}", o.calls);
+        assert!(!o.calls.contains(" -Bi "), "{}", o.calls);
     }
-    s.stub("curl", "exit 22");
+    s.stub("git", "exit 1");
     assert_eq!(run().code, 19);
 }
 

@@ -1,5 +1,7 @@
 # shellcheck shell=bash source=../lib/lib.sh
 . "${BASH_SOURCE[0]%/*}/../lib/lib.sh" || exit 1
+# shellcheck source=prerequisites.sh
+. "${BASH_SOURCE[0]%/*}/prerequisites.sh" || exit 1
 
 # What the AUR would bring, or a line `failed` where it cannot be asked. The helper
 # ends with 1 both when nothing is pending and when it failed, and only a failure
@@ -99,14 +101,13 @@ op_audit() {
         --get --data-urlencode "names=$1" https://aur-audit.wtako.net/package-analysis
 }
 
-# The selected names and versions are rechecked immediately before installation.
-# Equality constraints keep a changed version from satisfying a selected target.
-# Pass other pending updates through the helper's ignore option. Its dependency
-# resolver still controls additional builds, so this selects update targets only.
+# Helpers build these local checkouts directly. Keep each upstream tracking branch
+# at the inspected commit even if the helper refreshes it before building.
 screened() {
-    local name version base pending status=0 old arrow new rest
-    local -A selected=() available=() bases=() pending_names=() selected_bases=()
-    local -a targets=() ignored=()
+    local name version base pending status=0 old arrow new rest dir
+    local -A selected=() available=() bases=() selected_bases=() capabilities=()
+    local -a dirs=() ignored=()
+    local extra_output=false
     (($# > 0 && $# % 3 == 0)) || exit 14
     while (($#)); do
         name=$1 version=$2 base=$3
@@ -117,7 +118,6 @@ screened() {
         selected["$name"]=$version
         selected_bases["$name"]=$base
         bases["$base"]=$version
-        targets+=("aur/$name=$version")
         shift 3
     done
     [[ -n $SM_AUR ]] || exit 17
@@ -137,7 +137,6 @@ screened() {
     while read -r name old arrow new rest; do
         [[ -n $name ]] || continue
         [[ $name =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$ && $arrow == '->' && -n $new ]] || exit 17
-        pending_names["$name"]=1
         if [[ $rest == *'[ignored]'* ]]; then
             ignored+=(--ignore "$name")
         elif [[ -v selected[$name] ]]; then
@@ -149,17 +148,19 @@ screened() {
     for name in "${!selected[@]}"; do
         [[ ${available[$name]-} == "${selected[$name]}" ]] || exit 14
     done
-    # Shared builds can include held split packages. When updates are held,
-    # require prerequisites to be installed already before asking the helper
-    # to resolve dependencies for the selected transaction.
-    local metadata field equals value pkgver pkgrel epoch current actual_base arch missing
+    # Local build mode can target every output of a split recipe.
+    local metadata field equals value pkgver pkgrel epoch current actual_base arch
     local -a dependencies=()
     local -A seen=()
     arch=$(uname -m)
     for base in "${!bases[@]}"; do
-        metadata=$(curl --disable --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
-            --connect-timeout 3 --max-time 7 --max-filesize 2097152 \
-            --get --data-urlencode "h=$base" https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO) || exit 19
+        dir="$work/recipes/$base"
+        git -c core.hooksPath=/dev/null -c protocol.allow=never -c protocol.https.allow=always \
+            clone --quiet --depth 1 --single-branch --no-tags -- "https://aur.archlinux.org/$base.git" "$dir" || exit 19
+        git -C "$dir" remote set-url origin . || exit 19
+        [[ -f $dir/.SRCINFO && ! -L $dir/.SRCINFO && -f $dir/PKGBUILD && ! -L $dir/PKGBUILD ]] || exit 19
+        metadata=$(<"$dir/.SRCINFO")
+        dirs+=("$dir")
         pkgver='' pkgrel='' epoch='' current='' actual_base=''
         while read -r field equals value; do
             [[ $equals == '=' ]] || continue
@@ -171,8 +172,11 @@ screened() {
             pkgname)
                 [[ $value =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$ ]] || exit 19
                 current=$value
-                if [[ -v pending_names[$current] && ! -v selected[$current] ]]; then exit 18; fi
-                if [[ -v selected[$current] && ${selected_bases[$current]} != "$base" ]]; then exit 19; fi
+                if [[ ! -v selected[$current] ]]; then
+                    extra_output=true
+                elif [[ ${selected_bases[$current]} != "$base" ]]; then
+                    exit 19
+                fi
                 seen["$current"]=1
                 ;;
             depends | makedepends | checkdepends | "depends_$arch" | "makedepends_$arch" | "checkdepends_$arch")
@@ -187,17 +191,32 @@ screened() {
         version=$pkgver-$pkgrel
         [[ -z $epoch || $epoch == 0 ]] || version=$epoch:$version
         [[ $version == "${bases[$base]}" ]] || exit 14
+        collect_provisions "$base" "$arch" "$metadata" || exit 19
     done
     for name in "${!selected[@]}"; do
         [[ -v seen[$name] ]] || exit 19
     done
+    if "$extra_output"; then exit 20; fi
     if ((${#ignored[@]} && ${#dependencies[@]})); then
-        status=0
-        missing=$(pacman -T -- "${dependencies[@]}") || status=$?
-        [[ $status == 0 && -z $missing ]] || exit 18
+        prerequisites_satisfied "${dependencies[@]}" || exit 18
     fi
     step aur
-    aur_sync -S "${ignored[@]}" -- "${targets[@]}"
+    if asks || [[ ${SM_AUR_REVIEW:-on} != off ]]; then
+        # In local build mode the helpers may skip their own recipe review.
+        printf 'terminal\ton\n' >&3
+        for dir in "${dirs[@]}"; do
+            printf '\n%s\n' "${dir##*/}"
+            git -C "$dir" --no-pager show --no-ext-diff --no-textconv --format= HEAD | cat -v
+        done
+        printf 'Build the displayed AUR recipes? [y/N] '
+        local answer
+        if ! IFS= read -r answer || [[ ${answer,,} != @(y|yes) ]]; then
+            printf 'terminal\toff\n' >&3
+            exit 21
+        fi
+        printf 'terminal\toff\n' >&3
+    fi
+    aur_sync -Bi "${ignored[@]}" -- "${dirs[@]}"
 }
 
 # Repositories first, then what is built on top of them. A failing AUR helper
