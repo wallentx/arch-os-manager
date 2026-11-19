@@ -4,6 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use super::run::{Job, start};
+use crate::data::features::Features;
 use crate::i18n::{t, tf};
 use crate::script::{op, query};
 use crate::ui::detail::{Act, Block, Detail, done, failure, loaded, recheck, show};
@@ -118,6 +119,29 @@ impl FilePage {
     }
 }
 
+/// The editor named on the merge action and the reason it cannot be opened.
+fn merge_tool(
+    configured: Option<&std::ffi::OsStr>,
+    features: Option<&Features>,
+) -> (String, Option<String>) {
+    let Some(tool) = configured.filter(|s| !s.is_empty()) else {
+        let missing = !features.is_some_and(|f| f.ok("meld"));
+        return (
+            t("Merge in Meld").into(),
+            missing.then(|| t("needs meld").into()),
+        );
+    };
+    let name = std::path::Path::new(tool)
+        .file_name()
+        .unwrap_or(tool)
+        .to_string_lossy();
+    (
+        tf("Merge in {tool}", &[("tool", &name)]),
+        (!features.is_some_and(|f| f.facts.contains("difftool")))
+            .then(|| t("needs the configured diff tool").into()),
+    )
+}
+
 impl Page for FilePage {
     fn title(&self) -> String {
         self.file
@@ -211,13 +235,13 @@ impl Page for FilePage {
             ),
         ];
         let file = self.file.clone();
-        let meld = (!ctx.available(op::PACNEW_MERGE)).then(|| t("needs meld").to_string());
+        let (label, missing) = merge_tool(std::env::var_os("DIFFTOOL").as_deref(), ctx.features());
         acts.push(
-            Act::new(t("Merge in Meld"), move |ctx: &mut Ctx| {
+            Act::new(label, move |ctx: &mut Ctx| {
                 Flow::Push(start(Job::new(op::PACNEW_MERGE, vec![file.clone()]), ctx))
             })
             .icon(crate::ui::icon::PACNEW)
-            .unless(meld),
+            .unless(missing),
         );
         self.detail.set(body, acts);
         self.detail.draw(area, buf, ctx);
@@ -241,6 +265,25 @@ impl Page for FilePage {
 mod tests {
     use super::*;
     use crate::ui::app::tests::{app, open, press, screen};
+
+    #[test]
+    fn merge_action_follows_the_configured_tool_even_without_meld() {
+        let meld = Features::parse("meld\tok\t3\n");
+        let custom = Features::parse("meld\tmissing\n@difftool\tok\n");
+        for unset in [None, Some(std::ffi::OsStr::new(""))] {
+            assert_eq!(
+                merge_tool(unset, Some(&meld)),
+                ("Merge in Meld".into(), None)
+            );
+            assert!(merge_tool(unset, Some(&custom)).1.is_some());
+        }
+        let tool = Some(std::ffi::OsStr::new("/path with spaces/dplex"));
+        assert_eq!(
+            merge_tool(tool, Some(&custom)),
+            ("Merge in dplex".into(), None)
+        );
+        assert!(merge_tool(tool, Some(&meld)).1.is_some());
+    }
 
     /// What pacnew.sh never replaces is offered for merging only, with the reason.
     #[test]

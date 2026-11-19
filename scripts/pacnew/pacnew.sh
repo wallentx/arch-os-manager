@@ -38,19 +38,28 @@ op_keep() {
     sudo rm -f -- "$1"
 }
 
-# Meld runs as the user on copies, so it opens on Wayland and never edits as
-# root, in the person's language. What is saved on the left goes into the
-# configuration, which keeps its owner and mode.
+# The editor runs as the user on copies. A successful edit of the first file
+# becomes the configuration, which keeps its owner and mode.
 op_merge() {
-    local file="$1" target meta mode owner group
+    local file="$1" target meta mode owner group editor status=0
     update "$file"
     target="${file%.pac*}"
     if ! sudo test -e "$target"; then exit 10; fi
+    editor="$(difftool_path)" || exit 15
     scratch
     sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" -- "$target" "${work}/current"
     sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" -- "$file" "${work}/new"
     cp "${work}/current" "${work}/before"
-    env -u LC_ALL meld "${work}/current" "${work}/new"
+    (
+        unset LC_ALL
+        # Only the manager scripts own the control and trace descriptors.
+        exec -- "$editor" "${work}/current" "${work}/new" 3>&- 6>&-
+    ) || status=$?
+    case $status in
+    0) ;;
+    130) exit 12 ;;
+    *) return "$status" ;;
+    esac
     if cmp -s "${work}/current" "${work}/before"; then exit 12; fi
     # sudo refuses to start with a sudoers that does not parse.
     case "$target" in

@@ -444,6 +444,15 @@ msgstr "Maintainer"
 msgid "Marked"
 msgstr "Markiert"
 
+msgid "Merge in {tool}"
+msgstr "In {tool} zusammenführen"
+
+msgid "needs the configured diff tool"
+msgstr "benötigt das eingestellte Diff-Werkzeug"
+
+msgid "Diff tool unavailable\nCheck DIFFTOOL or install Meld.\n"
+msgstr "Diff-Werkzeug nicht verfügbar\nDIFFTOOL prüfen oder Meld installieren.\n"
+
 msgid "Merge in Meld"
 msgstr "In Meld zusammenführen"
 

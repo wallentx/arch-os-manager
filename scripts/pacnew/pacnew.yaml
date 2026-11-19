@@ -14,7 +14,6 @@ ops:
   merge:
     title: Merging the configuration
     root: true
-    needs: [meld]
     steps:
       snapshot: Taking a snapshot
 errors:
@@ -30,3 +29,6 @@ errors:
     visudo check failed. Nothing changed.
   14: |
     Merge required
+  15: |
+    Diff tool unavailable
+    Check DIFFTOOL or install Meld.
