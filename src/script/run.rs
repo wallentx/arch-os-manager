@@ -24,7 +24,8 @@ pub struct Run {
     pub op: Op,
     session: Session,
     screen: vt100::Parser,
-    lines: Lines,
+    /// Configuration merges render directly to the terminal without a diagnostic transcript.
+    lines: Option<Lines>,
     recent: VecDeque<String>,
     pub progress: Progress,
     /// The sentence of the step lib.sh announced last.
@@ -94,11 +95,18 @@ impl Run {
     }
 
     fn with(op: Op, session: Session, size: (u16, u16)) -> Run {
+        // PTY bytes and script events arrive independently. A merge must be private
+        // from its first byte through any buffered output delivered after exit.
+        let private = op == super::op::PACNEW_MERGE;
         Run {
             op,
             session,
-            screen: vt100::Parser::new(size.0.max(1), size.1.max(1), HISTORY),
-            lines: Lines::default(),
+            screen: vt100::Parser::new(
+                size.0.max(1),
+                size.1.max(1),
+                if private { 0 } else { HISTORY },
+            ),
+            lines: (!private).then(Lines::default),
             recent: VecDeque::new(),
             progress: Progress::default(),
             step: None,
@@ -108,7 +116,7 @@ impl Run {
             rejected: false,
             tried: false,
             verbose: false,
-            handed: false,
+            handed: private,
             declined: false,
             fail: None,
             exit: None,
@@ -123,7 +131,8 @@ impl Run {
             Event::Output(bytes) => {
                 self.heard = Instant::now();
                 self.screen.process(&bytes);
-                let done = self.lines.feed(&bytes);
+                let Some(lines) = &mut self.lines else { return };
+                let done = lines.feed(&bytes);
                 // A finished line closes the question answered: the same may come again.
                 if !done.is_empty() {
                     self.answered = None;
@@ -151,21 +160,26 @@ impl Run {
             }
             Event::Script(line) => {
                 if let Some(key) = line.strip_prefix("step\t") {
-                    crate::info!("{}: step {key}", self.op);
                     self.step = self.op.meta().steps.get(key).map(|s| t(s).to_string());
-                } else if let Some(command) = line.strip_prefix("cmd\t") {
-                    crate::log::write("RUN", &format!("{}| {command}", self.op));
-                    self.command = Some(command.to_string());
-                    self.tried = false;
-                } else if let Some(state) = line.strip_prefix("terminal\t") {
-                    self.handed = state == "on";
-                } else if let Some(item) = line.strip_prefix("found\t") {
-                    self.found.push(item.to_string());
-                } else if line.starts_with("fail\t") && self.fail.is_none() {
-                    self.fail = Some(line);
+                    if self.step.is_some() || self.lines.is_some() {
+                        crate::info!("{}: step {key}", self.op);
+                    }
                 } else if line == "refused" {
                     sudo::forget();
                     self.rejected = true;
+                } else if self.lines.is_some() {
+                    // Command traces and failure details belong to the transcript too.
+                    if let Some(command) = line.strip_prefix("cmd\t") {
+                        crate::log::write("RUN", &format!("{}| {command}", self.op));
+                        self.command = Some(command.to_string());
+                        self.tried = false;
+                    } else if let Some(state) = line.strip_prefix("terminal\t") {
+                        self.handed = state == "on";
+                    } else if let Some(item) = line.strip_prefix("found\t") {
+                        self.found.push(item.to_string());
+                    } else if line.starts_with("fail\t") && self.fail.is_none() {
+                        self.fail = Some(line);
+                    }
                 }
             }
             Event::Exit(code) => {
@@ -189,7 +203,8 @@ impl Run {
         if self.exit.is_some() {
             return;
         }
-        let current = self.lines.current();
+        let Some(lines) = &self.lines else { return };
+        let current = lines.current();
         // What the person types after it belongs to the question.
         if self.asked.as_ref().is_some_and(|q| !current.starts_with(q)) {
             self.asked = None;
@@ -247,7 +262,8 @@ impl Run {
 
     /// The person's answer to the open question.
     pub fn answer(&mut self, text: &str) {
-        let line = self.lines.current();
+        let Some(lines) = &self.lines else { return };
+        let line = lines.current();
         if self.prompt == Some(Prompt::Password) {
             // An empty one counts as a failed attempt towards the lock of pam_faillock. A
             // terminal that echoes would print it into the output and the log.
@@ -351,8 +367,9 @@ impl Run {
             return Some(Ok(()));
         }
         let mut tail: Vec<String> = self.recent.iter().rev().take(40).rev().cloned().collect();
-        let current = self.lines.current();
-        if !current.trim().is_empty() {
+        if let Some(current) = self.lines.as_ref().map(Lines::current)
+            && !current.trim().is_empty()
+        {
             tail.push(current);
         }
         let mut failure = Failure::classify(self.op, Some(code), self.fail.as_deref(), tail);
@@ -401,6 +418,59 @@ mod tests {
         }
         let text: Vec<String> = run.recent.iter().cloned().collect();
         (run, text.join("\n"))
+    }
+
+    #[test]
+    fn merge_contents_only_reach_the_live_terminal() {
+        use crate::script::op;
+        let path =
+            std::env::temp_dir().join(format!("sm-private-merge-{}.log", std::process::id()));
+        crate::log::init(&path).unwrap();
+        let mut run = Run::fed(
+            op::PACNEW_MERGE,
+            "snapshot",
+            "private-merge-first\r\nprivate-",
+        );
+        assert!(run.handed);
+        run.on_event(Event::Script("terminal\toff".into()));
+        run.on_event(Event::Output(b"merge-prompt? ".to_vec()));
+        run.check_at(Instant::now() + QUIET);
+        assert!(run.handed && run.prompt.is_none() && !run.waiting());
+        run.answer("private-merge-answer");
+        for event in [
+            "cmd\tprivate-merge-command",
+            "found\tprivate-merge-item",
+            "fail\t7\tmerge.sh\t1\tprivate-merge-diagnostic",
+            "step\tprivate-merge-step",
+        ] {
+            run.on_event(Event::Script(event.into()));
+        }
+        run.on_event(Event::Exit(1));
+        run.on_event(Event::Output(
+            b"\r\nprivate-merge-late\r\nprivate-merge-partial".to_vec(),
+        ));
+        run.exit = Some((1, Instant::now() - SETTLE));
+        let failure = run.result().unwrap().unwrap_err();
+        let screen = run.screen().contents();
+        for visible in [
+            "private-merge-first",
+            "private-merge-prompt?",
+            "private-merge-late",
+            "private-merge-partial",
+        ] {
+            assert!(screen.contains(visible));
+        }
+        assert!(run.command.is_none() && run.found.is_empty() && run.recent.is_empty());
+        assert!(failure.tail.is_empty());
+        assert!(!failure.detail.contains("private-merge-"));
+
+        Run::fed(op::SYSTEM_STATE, "", "ordinary-transcript-control\r\n");
+        assert!(crate::log::finish(Duration::from_secs(5)));
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(log.contains("ordinary-transcript-control"));
+        assert!(log.contains("pacnew merge: exit 1"));
+        assert!(!log.contains("private-merge-"));
+        std::fs::remove_file(path).unwrap();
     }
 
     /// A no to the handed-over helper reads as canceled. Any other end of the helper as failed.

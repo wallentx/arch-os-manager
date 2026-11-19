@@ -1979,10 +1979,6 @@ fn configured_merge_tool_uses_private_copies_and_applies_only_a_successful_save(
         );
         let o = run(tool);
         assert_ne!(o.code, 0);
-        assert_eq!(
-            o.events.lines().take(2).collect::<Vec<_>>(),
-            ["terminal\ton", "terminal\toff"]
-        );
         assert_eq!(std::fs::read_to_string(&current).unwrap(), "current\n");
         assert_eq!(std::fs::read_to_string(pending).unwrap(), "pending\n");
     }
@@ -1990,6 +1986,7 @@ fn configured_merge_tool_uses_private_copies_and_applies_only_a_successful_save(
     s.stub(
         "merge editor",
         r#"[[ $# == 2 && $(<"$1") == current && $(<"$2") == pending && ! -v LC_ALL ]] || exit 9
+[[ ! -e /proc/self/fd/3 && ! -e /proc/self/fd/6 ]] || exit 9
 cat "$2" > "$1""#,
     );
     let o = run(tool);

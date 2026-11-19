@@ -50,13 +50,11 @@ op_merge() {
     sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" -- "$target" "${work}/current"
     sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" -- "$file" "${work}/new"
     cp "${work}/current" "${work}/before"
-    # A custom editor may read keys and draw directly on the terminal.
-    if [[ -n ${DIFFTOOL:-} ]]; then printf 'terminal\ton\n' >&3; fi
     (
         unset LC_ALL
-        exec -- "$editor" "${work}/current" "${work}/new"
+        # Only the manager scripts own the control and trace descriptors.
+        exec -- "$editor" "${work}/current" "${work}/new" 3>&- 6>&-
     ) || status=$?
-    if [[ -n ${DIFFTOOL:-} ]]; then printf 'terminal\toff\n' >&3; fi
     case $status in
     0) ;;
     130) exit 12 ;;
