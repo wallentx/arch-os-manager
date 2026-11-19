@@ -76,6 +76,7 @@ impl Sandbox {
             .env("SM_FLATPAK", "off")
             // A session answers, unless a test takes it away.
             .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/sandbox")
+            .env_remove("DIFFTOOL")
             .env_remove("XDG_RUNTIME_DIR")
             .env("HOME", &self.dir)
             .env("XDG_CONFIG_HOME", self.dir.join("config"))
@@ -1940,6 +1941,66 @@ fn a_merge_over_a_link_keeps_the_mode_of_its_target() {
     assert_eq!(std::fs::read_to_string(&link).unwrap(), "merged\n");
     let mode = std::fs::metadata(&link).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o644);
+}
+
+#[test]
+fn configured_merge_tool_uses_private_copies_and_applies_only_a_successful_save() {
+    let s = Sandbox::new("pacnew-difftool");
+    let current = s.dir.join("test config");
+    let pending = current.with_extension("pacnew");
+    let pending = pending.to_str().unwrap();
+    std::fs::write(&current, "current\n").unwrap();
+    std::fs::write(pending, "pending\n").unwrap();
+    s.stub("pacdiff", &format!("printf '%s\\n' '{pending}'"));
+    s.stub("snapper", "exit 0");
+    s.stub("meld", "exit 99");
+    let editor = s.dir.join("bin/merge editor");
+    let tool = editor.to_str().unwrap();
+    let run = |configured| s.run("pacnew", &["merge", pending], &[("DIFFTOOL", configured)]);
+    let probe = |configured| {
+        s.run(
+            "features",
+            &["probe", "@difftool"],
+            &[("DIFFTOOL", configured)],
+        )
+    };
+
+    assert_eq!(probe("missing editor").out, "@difftool\tmissing\n");
+    assert_eq!(run("missing editor").code, 15);
+    assert_eq!(run("meld --version").code, 15);
+
+    s.stub("merge editor", "exit 0");
+    assert_eq!(probe(tool).out, "@difftool\tok\n");
+    assert_eq!(run(tool).code, 12);
+    for code in [130, 3] {
+        s.stub(
+            "merge editor",
+            &format!("printf partial >\"$1\"; exit {code}"),
+        );
+        let o = run(tool);
+        assert_ne!(o.code, 0);
+        assert_eq!(
+            o.events.lines().take(2).collect::<Vec<_>>(),
+            ["terminal\ton", "terminal\toff"]
+        );
+        assert_eq!(std::fs::read_to_string(&current).unwrap(), "current\n");
+        assert_eq!(std::fs::read_to_string(pending).unwrap(), "pending\n");
+    }
+
+    s.stub(
+        "merge editor",
+        r#"[[ $# == 2 && $(<"$1") == current && $(<"$2") == pending && ! -v LC_ALL ]] || exit 9
+cat "$2" > "$1""#,
+    );
+    let o = run(tool);
+    assert_eq!(o.code, 0, "{} {}", o.err, o.events);
+    assert_eq!(std::fs::read_to_string(current).unwrap(), "pending\n");
+    assert!(!std::path::Path::new(pending).exists());
+    assert!(
+        !o.calls
+            .lines()
+            .any(|l| l.starts_with("meld ") || l.starts_with("sudo merge editor"))
+    );
 }
 
 #[test]

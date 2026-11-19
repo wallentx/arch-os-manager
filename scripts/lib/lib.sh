@@ -165,6 +165,12 @@ scratch() {
     trap '{ rm -rf "$work"; } 6>/dev/null' EXIT
 }
 
+# Resolve the two-file editor as one external executable, including paths with spaces.
+difftool_path() {
+    local path
+    path="$(type -P -- "${DIFFTOOL:-meld}")" && [[ -f $path && -x $path ]] && printf '%s\n' "$path"
+}
+
 # Every request leaving the machine, bound to https, redirects included.
 fetch() {
     curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 "$@"

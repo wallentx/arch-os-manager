@@ -20,6 +20,7 @@ hints:
     offer: upgrade
 # What a package may need of the system, and why it is not offered without.
 facts:
+  difftool: needs the configured diff tool
   desktop: needs a desktop
   wayland: needs a Wayland session
   gnome: needs GNOME

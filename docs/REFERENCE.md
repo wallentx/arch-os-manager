@@ -98,6 +98,10 @@ Asked once per session before the first elevated run and checked with `sudo --va
 
 ### Config Updates
 
+The merge action uses the executable named by `DIFFTOOL`. It uses Meld when the variable is unset or empty. For example, `DIFFTOOL=dplex system-manager pacnew` opens configuration updates with dplex as the merge tool. You can also export the variable before starting the manager.
+
+The editor receives two private copies, the current configuration first and the pending file second. Save the merge to the first copy and exit successfully to apply it. If the tool exits unsuccessfully or leaves the first copy unchanged, the update stays pending. `DIFFTOOL` accepts an executable name or path. Tools that require additional arguments can use a wrapper script.
+
 Only a file pacdiff lists at that moment is replaced, kept or merged. `/etc/passwd`, `group`, `shadow`, `gshadow` and `sudoers` are merged, never replaced. Replacing a config update, or writing a merge that changed it, first takes a snapper snapshot where snapper manages `/`. A merge is written beside the file and renamed over it. A sudoers file must pass `visudo`.
 
 ### Services

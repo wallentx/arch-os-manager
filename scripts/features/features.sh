@@ -47,6 +47,11 @@ probe() {
     fi
 }
 
+# Custom editors need no desktop or standard --version option.
+fact_difftool() {
+    [[ -n ${DIFFTOOL:-} ]] && difftool_path >/dev/null
+}
+
 # A desktop is installed: a display manager has a session to offer.
 fact_desktop() {
     local sessions=(/usr/share/wayland-sessions/*.desktop /usr/share/xsessions/*.desktop)
