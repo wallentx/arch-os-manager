@@ -252,6 +252,7 @@ pub fn end_on_signals(tx: SyncSender<Msg>, wake: Arc<dyn Fn() + Send + Sync>) {
 pub enum Fresh {
     Features(Result<Features, Failure>),
     System(Result<System, Failure>),
+    UpdateList(Result<Pending, Failure>),
     Updates(Result<Pending, Failure>),
     News(Result<(Vec<Item>, bool), Failure>),
     Installed(Result<Vec<Installed>, Failure>),
@@ -280,6 +281,7 @@ pub enum Flow {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
+    Screening(crate::data::screening::Category),
     Normal,
     Muted,
     Accent,

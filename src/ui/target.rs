@@ -154,7 +154,7 @@ impl Target {
             Target::Status => t("Main menu status"),
             Target::AurHelper => t("AUR helper"),
             Target::AurReview => t("AUR review"),
-            Target::AurScreening => t("AUR update screening (WTAKO)"),
+            Target::AurScreening => t("AUR update screening"),
             Target::Output => t("Output"),
             Target::Flatpak => t("Flatpak updates"),
             Target::Notifications => t("Update notification"),
@@ -260,6 +260,7 @@ impl Target {
             Target::Settings => Box::new(pages::settings::SettingsPage::new(None)),
             Target::Features => Box::new(pages::features::FeaturesPage::new(None)),
             Target::About => Box::new(pages::settings::AboutPage::new()),
+            Target::AurScreening => pages::settings::screening::open(),
             Target::Language
             | Target::Theme
             | Target::AurHelper

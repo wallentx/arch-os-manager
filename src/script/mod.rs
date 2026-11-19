@@ -270,16 +270,21 @@ fn command(op: Op, args: &[String]) -> Result<Command, String> {
         .arg(dir()?.join(op.script).join(format!("{}.sh", op.script)))
         .arg(op.name)
         .args(args);
+    // Re-read blocks at the execution boundary in case another window recorded one.
+    let known = if op == op::UPGRADE_RUN && args.first().is_none_or(|mode| mode != "system") {
+        crate::state::State::try_load()
+            .map_err(|e| e.to_string())?
+            .aur_malicious
+            .into_keys()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let screened = AUR_SCREENING.load(Ordering::Relaxed);
+    cmd.env("SM_AUR_BLOCKED", known.join("\n"));
     cmd.env("LC_ALL", "C.UTF-8")
         .env("SM_AUR", AUR.lock().unwrap().as_str())
-        .env(
-            "SM_AUR_SCREENING",
-            if AUR_SCREENING.load(Ordering::Relaxed) {
-                "on"
-            } else {
-                "off"
-            },
-        )
+        .env("SM_AUR_SCREENING", if screened { "on" } else { "off" })
         .env("SM_AUR_REVIEW", *AUR_REVIEW.lock().unwrap())
         .env("SM_FLATPAK", *FLATPAK.lock().unwrap())
         .env("SUDO_PROMPT", sudo::PROMPT)

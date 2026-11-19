@@ -3,6 +3,8 @@ ops:
     title: Checking for updates
   idle:
     title: Waiting for the running update
+  scan:
+    title: Checking AUR security findings
   audit:
     title: Checking AUR security findings
   run:

@@ -107,6 +107,19 @@ impl UpgradePage {
                 body.extend(sections(ctx, ""));
             }
         }
+        if ctx.state.has_malicious()
+            && !ctx.settings.aur_screening
+            && ctx.shared.updates.ready().is_some_and(|p| {
+                p.updates.iter().any(|u| {
+                    u.source == Source::Aur && !ctx.state.aur_malicious.contains_key(&u.name)
+                })
+            })
+        {
+            body.push(Block::Text(
+                t("Enable AUR update screening to select other AUR updates.").into(),
+                Tone::Warn,
+            ));
+        }
         let mut acts = Vec::new();
         if news > 0 {
             acts.push(
@@ -119,12 +132,12 @@ impl UpgradePage {
         }
         if known_current {
             acts.push(recheck(ctx));
-        } else if ctx.settings.aur_screening {
+        } else if ctx.settings.aur_screening || ctx.state.has_malicious() {
             acts.extend(screening::actions(ctx));
         } else {
             acts.push(
                 Act::new(t("Install now"), |ctx: &mut Ctx| {
-                    if ctx.settings.aur_screening {
+                    if ctx.settings.aur_screening || ctx.state.has_malicious() {
                         return Flow::Stay;
                     }
                     Flow::Push(start(Job::new(op::UPGRADE_RUN, Vec::new()), ctx))
@@ -212,7 +225,8 @@ impl Page for UpgradePage {
     }
 
     fn animating(&self, ctx: &Ctx) -> bool {
-        matches!(ctx.shared.updates, Loaded::Loading) || ctx.checking()
+        matches!(ctx.shared.updates, Loaded::Loading)
+            || (ctx.checking() && !ctx.shared.updates.ready().is_some_and(|p| p.screening))
     }
 }
 
@@ -228,44 +242,88 @@ fn sections(ctx: &Ctx, query: &str) -> Vec<Block> {
     let change = changes(&pairs, ctx.style.glyphs.arrow);
     let shown = labels(list);
     let mut body = Vec::new();
-    let mut groups = vec![(Source::Repo, t("Official packages"), icon::PACKAGE, None)];
-    if ctx.settings.aur_screening {
-        groups.extend(screening::Group::ALL.map(|g| (Source::Aur, g.label(), icon::ARCH, Some(g))));
-    } else {
-        groups.push((Source::Aur, "AUR", icon::ARCH, None));
-    }
-    groups.push((Source::Flatpak, "Flatpak", icon::APP, None));
-    for (source, heading, glyph, group) in groups {
-        let part: Vec<_> = list
+    for (source, heading, glyph) in [
+        (Source::Repo, t("Official packages"), icon::PACKAGE),
+        (Source::Aur, "AUR", icon::ARCH),
+        (Source::Flatpak, "Flatpak", icon::APP),
+    ] {
+        let visible: Vec<_> = list
             .iter()
-            .zip(&change)
-            .zip(&shown)
-            .filter(|((u, _), label)| {
-                u.source == source
-                    && group.is_none_or(|g| g == screening::group(ctx, pending, u))
-                    && [&u.name, *label]
+            .enumerate()
+            .filter_map(|(i, u)| {
+                (u.source == source
+                    && [&u.name, &shown[i]]
                         .iter()
-                        .any(|s| s.to_lowercase().contains(query))
+                        .any(|s| s.to_lowercase().contains(query)))
+                .then_some(i)
             })
             .collect();
-        if part.is_empty() {
+        if visible.is_empty() {
             continue;
         }
-        body.push(Block::Styled(vec![vec![
-            (heading.to_string(), Tone::Normal, true),
-            (format!(" ({})", part.len()), Tone::Muted, false),
-        ]]));
-        for ((_, change), label) in part {
-            let (was, becomes) = change.clone();
-            body.push(Block::Row(
-                Lead::Icon(glyph, Tone::Muted),
-                vec![(label.clone(), Tone::Normal)],
-                vec![(was, Tone::Muted), (becomes, Tone::Accent)],
-            ));
+        if source == Source::Aur && (ctx.settings.aur_screening || ctx.state.has_malicious()) {
+            body.push(Block::Heading("AUR".into()));
+            if pending.screening {
+                body.push(Block::Text(
+                    t("Checking AUR scan sources").into(),
+                    Tone::Muted,
+                ));
+            }
+            for (group, packages) in screening::groups(ctx, pending, visible) {
+                if let Some((category, policy)) = group {
+                    body.push(Block::Styled(vec![vec![
+                        (
+                            ctx.style.glyphs.dot.into(),
+                            Tone::Screening(category),
+                            false,
+                        ),
+                        (
+                            format!(" {}", screening::heading(category, policy)),
+                            Tone::Normal,
+                            true,
+                        ),
+                        (format!(" ({})", packages.len()), Tone::Muted, false),
+                    ]]));
+                }
+                for i in packages {
+                    let up = if ctx.console { "^" } else { "↑" };
+                    let mut label = vec![
+                        (format!("  {up}  "), Tone::Muted),
+                        (shown[i].clone(), Tone::Normal),
+                    ];
+                    if let Some(status) = screening::decision_label(ctx, pending, &list[i]) {
+                        label.push((format!(" ({status})"), Tone::Muted));
+                    }
+                    body.push(update_row(Lead::None, label, &change[i]));
+                }
+            }
+        } else {
+            body.push(Block::Styled(vec![vec![
+                (heading.to_string(), Tone::Normal, true),
+                (format!(" ({})", visible.len()), Tone::Muted, false),
+            ]]));
+            for i in visible {
+                body.push(update_row(
+                    Lead::Icon(glyph, Tone::Muted),
+                    vec![(shown[i].clone(), Tone::Normal)],
+                    &change[i],
+                ));
+            }
         }
         body.push(Block::Blank);
     }
     body
+}
+
+fn update_row(lead: Lead, label: Vec<(String, Tone)>, change: &(String, String)) -> Block {
+    Block::Row(
+        lead,
+        label,
+        vec![
+            (change.0.clone(), Tone::Muted),
+            (change.1.clone(), Tone::Accent),
+        ],
+    )
 }
 
 /// What each row shows: a package by its name, a Flatpak by the name Flatpak shows, with its

@@ -3,6 +3,13 @@
 # shellcheck source=prerequisites.sh
 . "${BASH_SOURCE[0]%/*}/prerequisites.sh" || exit 1
 
+# shellcheck source=sources.sh
+. "${BASH_SOURCE[0]%/*}/sources.sh" || exit 1
+
+op_scan() {
+    scan_source "$@"
+}
+
 # What the AUR would bring, or a line `failed` where it cannot be asked. The helper
 # ends with 1 both when nothing is pending and when it failed, and only a failure
 # says why. A package pacman ignores stays as it is.
@@ -120,6 +127,13 @@ screened() {
         bases["$base"]=$version
         shift 3
     done
+    # A previously confirmed package can also be requested as a dependency,
+    # even when it is absent from the helper's latest list of updates.
+    while IFS= read -r name; do
+        [[ -n $name ]] || continue
+        [[ $name =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$ && ! -v selected[$name] && ! -v bases[$name] ]] || exit 14
+        ignored+=(--ignore "$name")
+    done <<<"${SM_AUR_BLOCKED:-}"
     [[ -n $SM_AUR ]] || exit 17
     pending=$(flock --wait 100 "${TMPDIR:-/tmp}/checkup-db-${UID}.lock" checkupdates) || status=$?
     case $status in
@@ -233,7 +247,7 @@ op_run() {
     system) [[ $# == 1 ]] || exit 14 ;;
     all)
         [[ $# == 0 ]] || exit 14
-        [[ ${SM_AUR_SCREENING:-off} != on ]] || exit 16
+        [[ ${SM_AUR_SCREENING:-off} != on && -z ${SM_AUR_BLOCKED:-} ]] || exit 16
         ;;
     *) exit 14 ;;
     esac

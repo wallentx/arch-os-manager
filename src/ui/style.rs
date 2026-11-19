@@ -147,6 +147,7 @@ impl Style {
 
     pub fn color(&self, tone: Tone) -> Color {
         match tone {
+            Tone::Screening(category) => self.screening_color(category),
             Tone::Normal => self.text,
             Tone::Muted => self.muted,
             Tone::Accent => self.accent,
@@ -154,6 +155,28 @@ impl Style {
             Tone::Warn => self.warning,
             Tone::Error => self.error,
         }
+    }
+
+    /// The five screening markers keep the same hue in every theme. Light
+    /// backgrounds use a darker shade so the small glyphs remain legible.
+    fn screening_color(&self, category: crate::data::screening::Category) -> Color {
+        use crate::data::screening::Category::*;
+        let (dark, light, console) = match category {
+            Clean => ((126, 195, 126), (30, 125, 53), Color::Green),
+            Minor => ((160, 165, 175), (89, 99, 110), Color::Gray),
+            Suspicious => ((238, 207, 93), (137, 111, 0), Color::Yellow),
+            Missing => ((245, 157, 89), (182, 80, 0), Color::LightRed),
+            Malicious => ((239, 112, 119), (191, 33, 49), Color::Red),
+        };
+        let Color::Rgb(r, g, b) = self.background else {
+            return console;
+        };
+        let (r, g, b) = if u16::from(r) + u16::from(g) + u16::from(b) > 3 * 128 {
+            light
+        } else {
+            dark
+        };
+        Color::Rgb(r, g, b)
     }
 
     pub fn base(&self) -> Cell {

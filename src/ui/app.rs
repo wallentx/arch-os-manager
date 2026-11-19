@@ -314,19 +314,12 @@ impl App {
                 }
             };
         }
-        let screening = ctx.settings.aur_screening;
         gated!(
             updates,
             op::UPGRADE_LIST,
             remote,
-            Updates,
-            query(op::UPGRADE_LIST, &[]).map(|o| {
-                let mut pending = data::updates::parse(&o);
-                if screening {
-                    pending.screens = data::screening::lookup(&pending.updates);
-                }
-                pending
-            })
+            UpdateList,
+            query(op::UPGRADE_LIST, &[]).map(|o| data::updates::parse(&o))
         );
         gated!(
             pacnew,
@@ -376,12 +369,33 @@ impl App {
                 }
             }
             Fresh::System(r) => s.system = Loaded::from(r),
-            Fresh::Updates(r) => {
+            Fresh::UpdateList(Ok(mut pending))
                 if self.ctx.settings.aur_screening
-                    && script::aur().is_some()
-                    && let Ok(pending) = &r
+                    && pending
+                        .updates
+                        .iter()
+                        .any(|u| u.source == data::updates::Source::Aur) =>
+            {
+                let mut listing = pending.clone();
+                listing.screening = true;
+                self.ctx.state.show_malicious(&mut listing);
+                s.updates = Loaded::Ready(listing);
+                let settings = self.ctx.settings.clone();
+                self.ctx.remote(op::UPGRADE_SCAN, move || {
+                    pending.scan_generation =
+                        State::try_load().ok().map(|s| s.aur_block_generation);
+                    pending.screens = data::screening::lookup(&pending.updates, &settings);
+                    Fresh::Updates(Ok(pending))
+                });
+            }
+            Fresh::UpdateList(r) => self.fresh(Fresh::Updates(r)),
+            Fresh::Updates(mut r) => {
+                if let Ok(pending) = &mut r
+                    && (!pending.screens.is_empty() || script::aur().is_some())
                 {
-                    self.ctx.state.refresh_aur_decisions(pending);
+                    self.ctx
+                        .state
+                        .refresh_aur_decisions(pending, &self.ctx.settings);
                 }
                 s.updates = Loaded::from(r);
                 // Installed, here or elsewhere: a notification still about them goes.

@@ -1,5 +1,7 @@
 //! Settings: what is written to settings.yaml, and what follows from it on the system.
 
+pub(crate) mod screening;
+
 use std::time::Instant;
 
 use ratatui::buffer::Buffer;
@@ -270,13 +272,7 @@ impl Page for SettingsPage {
                 ctx.save_settings();
                 Flow::Stay
             }
-            Target::AurScreening => {
-                ctx.settings.aur_screening = !ctx.settings.aur_screening;
-                script::configure(&ctx.settings, ctx.features());
-                ctx.recheck();
-                ctx.save_settings();
-                Flow::Stay
-            }
+            Target::AurScreening => Flow::Push(screening::open()),
             Target::AurReview => {
                 let on = !ctx.settings.aur_review.unwrap_or(true);
                 ctx.settings.aur_review = crate::settings::switch(on);

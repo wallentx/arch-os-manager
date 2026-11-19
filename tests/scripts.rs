@@ -911,6 +911,25 @@ fn screened_upgrades_refuse_invalid_stale_or_unavailable_selections_before_insta
 }
 
 #[test]
+fn a_remembered_compromise_cannot_become_an_explicit_screened_target() {
+    let s = Sandbox::new("screened-compromised");
+    let o = s.run(
+        "upgrade",
+        &["run", "screened", "blocked", "2-1", "blocked"],
+        &[("SM_AUR", "paru"), ("SM_AUR_BLOCKED", "other\nblocked")],
+    );
+    assert_eq!(o.code, 14);
+    assert!(o.calls.is_empty());
+    let bulk = s.run(
+        "upgrade",
+        &["run"],
+        &[("SM_AUR", "paru"), ("SM_AUR_BLOCKED", "blocked")],
+    );
+    assert_eq!(bulk.code, 16);
+    assert!(bulk.calls.is_empty());
+}
+
+#[test]
 fn screening_requires_explicit_aur_selection_and_system_updates_skip_the_helper() {
     let s = Sandbox::new("screened-system");
     for command in ["pacman", "flatpak", "paru"] {
