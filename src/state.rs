@@ -13,8 +13,12 @@ pub struct State {
     /// An exception applies only while the candidate version and findings still match.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub aur_trust: BTreeMap<String, Report>,
-    /// A confirmed finding survives outages and source changes until its source clears the candidate.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Keyed by name=version so an assessment cannot block a different release.
+    #[serde(
+        default,
+        deserialize_with = "versioned_blocks",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub aur_malicious: BTreeMap<String, BTreeMap<Scanner, Evidence>>,
     /// A clean lookup may clear an earlier block only if no newer block was recorded meanwhile.
     #[serde(default, skip_serializing_if = "zero")]
@@ -35,6 +39,33 @@ pub struct State {
     /// closes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification: Option<String>,
+}
+
+type Blocks = BTreeMap<String, BTreeMap<Scanner, Evidence>>;
+
+/// Older state files grouped blocks by name. Import only verdicts that identify their version.
+fn versioned_blocks<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Blocks, D::Error> {
+    let mut blocks = Blocks::new();
+    for (key, records) in Blocks::deserialize(d)? {
+        let (name, keyed_version) = match key.split_once('=') {
+            Some((name, version)) => (name, Some(version)),
+            None => (key.as_str(), None),
+        };
+        for (scanner, evidence) in records {
+            if let Some(v) = evidence.version.as_deref()
+                && !v.is_empty()
+                && keyed_version.is_none_or(|expected| expected == v)
+                && evidence.category == Category::Malicious
+                && evidence.scanner == scanner
+            {
+                blocks
+                    .entry(format!("{name}={v}"))
+                    .or_default()
+                    .insert(scanner, evidence);
+            }
+        }
+    }
+    Ok(blocks)
 }
 
 fn zero(n: &u64) -> bool {
@@ -66,6 +97,25 @@ impl State {
         !self.aur_malicious.is_empty()
     }
 
+    pub fn malicious_evidence(&self, name: &str, version: &str) -> impl Iterator<Item = &Evidence> {
+        self.aur_malicious
+            .get(&format!("{name}={version}"))
+            .into_iter()
+            .flat_map(|s| s.values())
+    }
+
+    pub fn is_malicious(&self, name: &str, version: &str) -> bool {
+        self.malicious_evidence(name, version).next().is_some()
+    }
+
+    pub fn blocks_pending(&self, pending: &Pending) -> bool {
+        pending
+            .updates
+            .iter()
+            .any(|u| u.source == Source::Aur && self.is_malicious(&u.name, &u.new))
+            || (self.has_malicious() && pending.failed.contains(&Source::Aur))
+    }
+
     pub fn deferred(&self, name: &str, settings: &crate::settings::Settings) -> bool {
         self.aur_deferrals
             .get(name)
@@ -81,17 +131,22 @@ impl State {
         let can_clear = started_at == Some(self.aur_block_generation);
         let mut changed = false;
         for (name, report) in reports {
-            for item in &report.evidence {
+            let key = format!("{name}={}", report.version);
+            for item in report
+                .evidence
+                .iter()
+                .filter(|item| item.matches_candidate(&report.version))
+            {
                 if item.category == Category::Malicious {
                     changed = true;
                     self.aur_malicious
-                        .entry(name.clone())
+                        .entry(key.clone())
                         .or_default()
                         .insert(item.scanner, item.clone());
                 } else if can_clear
                     && item.category == Category::Clean
                     && item.version.as_ref() == Some(&report.version)
-                    && let Some(known) = self.aur_malicious.get_mut(name)
+                    && let Some(known) = self.aur_malicious.get_mut(&key)
                 {
                     changed |= known.remove(&item.scanner).is_some();
                 }
@@ -138,7 +193,10 @@ impl State {
 
     pub fn show_malicious(&self, pending: &mut Pending) {
         for update in pending.updates.iter().filter(|u| u.source == Source::Aur) {
-            let Some(known) = self.aur_malicious.get(&update.name) else {
+            let Some(known) = self
+                .aur_malicious
+                .get(&format!("{}={}", update.name, update.new))
+            else {
                 continue;
             };
             let report = pending
@@ -183,20 +241,25 @@ impl State {
         self.observe_malicious(&pending.screens, pending.scan_generation);
         let complete = !pending.failed.contains(&Source::Aur);
         self.aur_trust.retain(|name, trusted| {
-            !self.aur_malicious.contains_key(name)
+            !self
+                .aur_malicious
+                .contains_key(&format!("{name}={}", trusted.version))
                 && match pending.screens.get(name) {
                     Some(report) => report == trusted,
                     None => !complete,
                 }
         });
         self.aur_holds.retain(|name, _| {
-            self.aur_malicious.contains_key(name)
-                || !pending.screens.get(name).is_some_and(|r| {
-                    r.category == Category::Clean
-                        && pending.updates.iter().any(|u| {
-                            u.source == Source::Aur && u.name == *name && u.new == r.version
-                        })
-                })
+            !pending.screens.get(name).is_some_and(|r| {
+                !self
+                    .aur_malicious
+                    .contains_key(&format!("{name}={}", r.version))
+                    && r.category == Category::Clean
+                    && pending
+                        .updates
+                        .iter()
+                        .any(|u| u.source == Source::Aur && u.name == *name && u.new == r.version)
+            })
         });
     }
 
@@ -306,6 +369,38 @@ mod tests {
                 blocked
             );
         }
+    }
+
+    #[test]
+    fn legacy_blocks_apply_only_to_the_version_the_provider_identified() {
+        let legacy = r#"
+aur-malicious:
+  pkg:
+    wtako: {scanner: wtako, version: old, category: malicious, summary: black, findings: [], url: reported}
+    aurwatch: {scanner: aurwatch, version: null, category: malicious, summary: unversioned, findings: [], url: unknown}
+"#;
+        let mut state: State = serde_saphyr::from_str(legacy).unwrap();
+        assert_eq!(state.malicious_evidence("pkg", "old").count(), 1);
+        assert!(!state.is_malicious("pkg", "new"));
+        let mut next = crate::data::updates::parse("aur\tpkg\told\tnew\n");
+        assert!(!state.blocks_pending(&next));
+        state.show_malicious(&mut next);
+        assert!(next.screens.is_empty());
+
+        let e = Evidence {
+            scanner: Scanner::Wtako,
+            version: Some("new".into()),
+            category: Category::Malicious,
+            summary: "black".into(),
+            findings: vec![],
+            url: "reported".into(),
+        };
+        next.screens
+            .insert("pkg".into(), Report::new("new", vec![e]));
+        state.observe_malicious(&next.screens, None);
+        assert!(state.blocks_pending(&next) && state.is_malicious("pkg", "old"));
+        let stored = serde_saphyr::to_string(&state).unwrap();
+        assert_eq!(state, serde_saphyr::from_str::<State>(&stored).unwrap());
     }
 
     #[test]

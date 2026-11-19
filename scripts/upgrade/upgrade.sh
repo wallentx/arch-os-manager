@@ -108,6 +108,11 @@ op_audit() {
         --get --data-urlencode "names=$1" https://aur-audit.wtako.net/package-analysis
 }
 
+# Stored blocks identify a specific package release.
+blocked_version() {
+    [[ $'\n'${SM_AUR_BLOCKED:-}$'\n' == *$'\n'"$1=$2"$'\n'* ]]
+}
+
 # Helpers build these local checkouts directly. Keep each upstream tracking branch
 # at the inspected commit even if the helper refreshes it before building.
 screened() {
@@ -122,18 +127,12 @@ screened() {
             $base =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$ &&
             $version =~ ^[a-zA-Z0-9._+:~\-]+$ && ! -v selected[$name] ]] || exit 14
         [[ ! -v bases[$base] || ${bases[$base]} == "$version" ]] || exit 14
+        if blocked_version "$name" "$version" || blocked_version "$base" "$version"; then exit 14; fi
         selected["$name"]=$version
         selected_bases["$name"]=$base
         bases["$base"]=$version
         shift 3
     done
-    # A previously confirmed package can also be requested as a dependency,
-    # even when it is absent from the helper's latest list of updates.
-    while IFS= read -r name; do
-        [[ -n $name ]] || continue
-        [[ $name =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$ && ! -v selected[$name] && ! -v bases[$name] ]] || exit 14
-        ignored+=(--ignore "$name")
-    done <<<"${SM_AUR_BLOCKED:-}"
     [[ -n $SM_AUR ]] || exit 17
     pending=$(flock --wait 100 "${TMPDIR:-/tmp}/checkup-db-${UID}.lock" checkupdates) || status=$?
     case $status in
@@ -211,7 +210,7 @@ screened() {
         [[ -v seen[$name] ]] || exit 19
     done
     if "$extra_output"; then exit 20; fi
-    if ((${#ignored[@]} && ${#dependencies[@]})); then
+    if ((${#dependencies[@]})) && { ((${#ignored[@]})) || [[ $block_policy == strict ]]; }; then
         prerequisites_satisfied "${dependencies[@]}" || exit 18
     fi
     step aur
@@ -237,17 +236,29 @@ screened() {
 # leaves Flatpak still to update. It also fails where nothing is left to do and
 # the AUR is out of reach, so what it left decides the end.
 op_run() {
-    local aur=0 yes mode=${1:-all}
+    local aur=0 yes mode=${1:-all} block_policy=clear
     case $mode in
-    screened)
+    screened | guarded)
         shift
-        screened "$@"
-        return
+        if [[ ${1:-} == --blocks ]]; then
+            [[ $# -ge 6 && $2 =~ ^[0-9]+$ && $2 == "${SM_AUR_BLOCK_GENERATION:-}" &&
+                ($3 == strict || $3 == clear) ]] || exit 14
+            block_policy=$3
+            shift 3
+        elif [[ $mode == guarded || -n ${SM_AUR_BLOCKED:-} ]]; then
+            exit 14
+        fi
+        if [[ $mode == screened ]]; then
+            screened "$@"
+            return
+        fi
+        [[ ${SM_AUR_SCREENING:-off} != on ]] || exit 16
         ;;
     system) [[ $# == 1 ]] || exit 14 ;;
     all)
         [[ $# == 0 ]] || exit 14
-        [[ ${SM_AUR_SCREENING:-off} != on && -z ${SM_AUR_BLOCKED:-} ]] || exit 16
+        [[ ${SM_AUR_SCREENING:-off} != on ]] || exit 16
+        [[ -z $SM_AUR || -z ${SM_AUR_BLOCKED:-} ]] || exit 16
         ;;
     *) exit 14 ;;
     esac
@@ -261,6 +272,10 @@ op_run() {
         step flatpak
         if asks; then yes=(); else yes=(--assumeyes --noninteractive); fi
         flatpak update "${yes[@]}"
+    fi
+    if [[ $mode == guarded ]]; then
+        # Finish independent system updates even if the pinned AUR build cannot proceed.
+        screened "$@"
     fi
     if [ "$aur" -ne 0 ]; then
         # A helper that no longer starts, as after a pacman update until it is rebuilt, ends

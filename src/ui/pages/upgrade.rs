@@ -25,6 +25,16 @@ pub struct UpgradePage {
     filter: Option<(Input, Detail)>,
 }
 
+/// When the inventory is unavailable, a remembered block still rules out the
+/// unrestricted upgrade. With a fresh inventory only affected candidates need screening.
+fn screened_update(ctx: &Ctx) -> bool {
+    ctx.settings.aur_screening
+        || ctx.shared.updates.ready().map_or_else(
+            || ctx.state.has_malicious(),
+            |p| ctx.state.blocks_pending(p),
+        )
+}
+
 impl UpgradePage {
     pub fn new() -> UpgradePage {
         UpgradePage {
@@ -107,12 +117,12 @@ impl UpgradePage {
                 body.extend(sections(ctx, ""));
             }
         }
-        if ctx.state.has_malicious()
-            && !ctx.settings.aur_screening
+        if !ctx.settings.aur_screening
             && ctx.shared.updates.ready().is_some_and(|p| {
-                p.updates.iter().any(|u| {
-                    u.source == Source::Aur && !ctx.state.aur_malicious.contains_key(&u.name)
-                })
+                ctx.state.blocks_pending(p)
+                    && p.updates.iter().any(|u| {
+                        u.source == Source::Aur && !ctx.state.is_malicious(&u.name, &u.new)
+                    })
             })
         {
             body.push(Block::Text(
@@ -132,18 +142,35 @@ impl UpgradePage {
         }
         if known_current {
             acts.push(recheck(ctx));
-        } else if ctx.settings.aur_screening || ctx.state.has_malicious() {
+        } else if screened_update(ctx) {
             acts.extend(screening::actions(ctx));
         } else {
             acts.push(
                 Act::new(t("Install now"), |ctx: &mut Ctx| {
-                    if ctx.settings.aur_screening || ctx.state.has_malicious() {
+                    if screened_update(ctx) {
                         return Flow::Stay;
                     }
-                    Flow::Push(start(Job::new(op::UPGRADE_RUN, Vec::new()), ctx))
+                    let job = if ctx.state.has_malicious() {
+                        let Some(p) = ctx.shared.updates.ready() else {
+                            return Flow::Stay;
+                        };
+                        let candidates = p
+                            .updates
+                            .iter()
+                            .filter(|u| u.source == Source::Aur)
+                            .map(|u| (u.name.clone(), u.new.clone()))
+                            .collect();
+                        Job::guarded(candidates)
+                    } else {
+                        Job::new(op::UPGRADE_RUN, Vec::new())
+                    };
+                    Flow::Push(start(job, ctx))
                 })
                 .icon(icon::UPDATE),
             );
+            if ctx.state.has_malicious() {
+                acts.extend(screening::system_action(ctx));
+            }
         }
         self.detail.set(body, acts);
         if !self.focused {
@@ -261,7 +288,7 @@ fn sections(ctx: &Ctx, query: &str) -> Vec<Block> {
         if visible.is_empty() {
             continue;
         }
-        if source == Source::Aur && (ctx.settings.aur_screening || ctx.state.has_malicious()) {
+        if source == Source::Aur && screened_update(ctx) {
             body.push(Block::Heading("AUR".into()));
             if pending.screening {
                 body.push(Block::Text(
@@ -286,11 +313,12 @@ fn sections(ctx: &Ctx, query: &str) -> Vec<Block> {
                     ]]));
                 }
                 for i in packages {
-                    let up = if ctx.console { "^" } else { "↑" };
-                    let mut label = vec![
-                        (format!("  {up}  "), Tone::Muted),
-                        (shown[i].clone(), Tone::Normal),
-                    ];
+                    let prefix = if ctx.style.glyphs.icons {
+                        format!("  {glyph}  ")
+                    } else {
+                        "  ".into()
+                    };
+                    let mut label = vec![(prefix, Tone::Muted), (shown[i].clone(), Tone::Normal)];
                     if let Some(status) = screening::decision_label(ctx, pending, &list[i]) {
                         label.push((format!(" ({status})"), Tone::Muted));
                     }

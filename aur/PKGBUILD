@@ -10,8 +10,9 @@ url='https://github.com/murkl/arch-os-manager'
 # The program, then Fira Code and the Nerd Fonts symbols it carries.
 license=('GPL-3.0-or-later' 'OFL-1.1' 'MIT')
 # checkupdates needs fakeroot, which pacman-contrib only suggests, config updates need
-# diffutils, which base lacks, and a terminal finds the icons in ttf-nerd-fonts-symbols.
-depends=('glibc' 'libgcc' 'sudo' 'pacman-contrib' 'fakeroot' 'diffutils' 'ttf-nerd-fonts-symbols')
+# diffutils, which base lacks. GLib's gio opens report links in the default browser.
+# A terminal finds the icons in ttf-nerd-fonts-symbols.
+depends=('glibc' 'glib2' 'libgcc' 'sudo' 'pacman-contrib' 'fakeroot' 'diffutils' 'ttf-nerd-fonts-symbols')
 makedepends=('cargo')
 optdepends=(
     'paru: builds and updates packages from the AUR'

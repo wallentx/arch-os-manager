@@ -8,6 +8,8 @@ ops:
     title: Closing the notification
   open:
     title: Opening the manager
+  open-report:
+    title: Opening the scan report
   extension-install:
     title: Installing the GNOME extension
   extension-remove:
@@ -23,3 +25,5 @@ errors:
     Remove it on the Packages page.
   13: |
     Update indicator not set up
+  14: |
+    Could not open the scan report

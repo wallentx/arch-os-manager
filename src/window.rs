@@ -571,7 +571,14 @@ impl ApplicationHandler<()> for Win {
                 let _ = match self.edge() {
                     Some(direction) => w.drag_resize_window(direction),
                     None if self.pointer.y < header => w.drag_window(),
-                    None => Ok(()),
+                    None => {
+                        let size = w.inner_size();
+                        let grid = layout(size.width, size.height, &self.fonts, w.scale_factor());
+                        if let Some(at) = pointer_cell(self.pointer, grid, self.fonts.cell) {
+                            self.handle(Msg::Click(at.x, at.y), event_loop);
+                        }
+                        Ok(())
+                    }
                 };
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -687,6 +694,18 @@ fn layout(width: u32, height: u32, fonts: &Fonts, scale: f64) -> (u32, u32, Rect
         (height.saturating_sub(rows * ch)) / 2,
         Rect::new(0, 0, cols as u16, rows as u16),
     )
+}
+
+/// The cell under a physical pointer, excluding the margins around the grid.
+fn pointer_cell(
+    point: PhysicalPosition<f64>,
+    (ox, oy, grid): (u32, u32, Rect),
+    (cw, ch): (u32, u32),
+) -> Option<Position> {
+    let x = (point.x - f64::from(ox)) / f64::from(cw);
+    let y = (point.y - f64::from(oy)) / f64::from(ch);
+    ((0.0..f64::from(grid.width)).contains(&x) && (0.0..f64::from(grid.height)).contains(&y))
+        .then(|| Position::new(x as u16, y as u16))
 }
 
 /// The rows to paint over a buffer that showed the frame `age` frames back, and to name to the
@@ -824,6 +843,9 @@ fn paint(
             let Some(c) = cell.symbol().chars().next().filter(|c| *c != ' ') else {
                 continue;
             };
+            if cell.modifier.contains(Modifier::UNDERLINED) {
+                canvas.fill(px, py + ch.saturating_sub(2), cw, 1, fg);
+            }
             let bold = cell.modifier.contains(Modifier::BOLD);
             if !canvas.drawn(c, (px, py, cw, ch), (fg, bg), scale) {
                 let baseline = fonts.baseline;
@@ -1290,6 +1312,17 @@ pub mod tests {
             repaint(&shown, 1, &frame(Color::Rgb(0x28, 0x2a, 0x36))),
             None
         );
+    }
+
+    #[test]
+    fn native_clicks_use_grid_cells_and_ignore_the_window_margins() {
+        let grid = (17, 13, Rect::new(0, 0, 4, 3));
+        let hit = |x, y| pointer_cell(PhysicalPosition::new(x, y), grid, (9, 18));
+        assert_eq!(hit(17.0, 13.0), Some(Position::new(0, 0)));
+        assert_eq!(hit(52.9, 66.9), Some(Position::new(3, 2)));
+        for (x, y) in [(16.9, 13.0), (17.0, 12.9), (53.0, 20.0), (25.0, 67.0)] {
+            assert_eq!(hit(x, y), None);
+        }
     }
 
     #[test]

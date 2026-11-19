@@ -189,7 +189,8 @@ impl Settings {
     fn default_screening_policy(category: Category) -> Policy {
         match category {
             Category::Clean => Policy::Allow,
-            Category::Minor | Category::Missing => Policy::Inspect,
+            Category::Minor => Policy::Inspect,
+            Category::Missing => Policy::Defer,
             Category::Suspicious | Category::Malicious => Policy::Block,
         }
     }
@@ -298,7 +299,7 @@ mod tests {
             aur_review: Some(false),
             aur_screening: true,
             aur_screening_sources: BTreeMap::from([(Scanner::Wtako, false)]),
-            aur_screening_policies: BTreeMap::from([(Category::Missing, Policy::Defer)]),
+            aur_screening_policies: BTreeMap::from([(Category::Missing, Policy::Inspect)]),
             output: Some("verbose".into()),
             app_menu: Some(false),
             notify: Some("daily".into()),
@@ -319,10 +320,7 @@ mod tests {
                 .into_iter()
                 .all(|scanner| settings.scanner_enabled(scanner))
         );
-        assert_eq!(
-            settings.screening_policy(Category::Missing),
-            Policy::Inspect
-        );
+        assert_eq!(settings.screening_policy(Category::Missing), Policy::Defer);
         assert_eq!(settings.screening_policy(Category::Minor), Policy::Inspect);
         assert_eq!(
             settings.screening_policy(Category::Suspicious),

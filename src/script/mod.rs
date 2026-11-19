@@ -270,18 +270,27 @@ fn command(op: Op, args: &[String]) -> Result<Command, String> {
         .arg(dir()?.join(op.script).join(format!("{}.sh", op.script)))
         .arg(op.name)
         .args(args);
-    // Re-read blocks at the execution boundary in case another window recorded one.
-    let known = if op == op::UPGRADE_RUN && args.first().is_none_or(|mode| mode != "system") {
-        crate::state::State::try_load()
-            .map_err(|e| e.to_string())?
-            .aur_malicious
-            .into_keys()
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let screened = AUR_SCREENING.load(Ordering::Relaxed);
-    cmd.env("SM_AUR_BLOCKED", known.join("\n"));
+    // The transaction and its preflight must agree on the same saved blocks.
+    let mut screened = AUR_SCREENING.load(Ordering::Relaxed);
+    let (generation, known) =
+        if op == op::UPGRADE_RUN && args.first().is_none_or(|mode| mode != "system") {
+            let state = crate::state::State::try_load().map_err(|e| e.to_string())?;
+            let (saved, error) = crate::settings::Settings::load();
+            if !args.is_empty()
+                && let Some(e) = error
+            {
+                return Err(e);
+            }
+            screened |= saved.aur_screening;
+            (
+                state.aur_block_generation,
+                state.aur_malicious.into_keys().collect::<Vec<_>>(),
+            )
+        } else {
+            (0, Vec::new())
+        };
+    cmd.env("SM_AUR_BLOCK_GENERATION", generation.to_string())
+        .env("SM_AUR_BLOCKED", known.join("\n"));
     cmd.env("LC_ALL", "C.UTF-8")
         .env("SM_AUR", AUR.lock().unwrap().as_str())
         .env("SM_AUR_SCREENING", if screened { "on" } else { "off" })

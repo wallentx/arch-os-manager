@@ -16,9 +16,9 @@ fn disposition(ctx: &Ctx, pending: &Pending, u: &Update) -> (Category, Policy) {
     let category = pending
         .screens
         .get(&u.name)
-        .filter(|r| r.category == Category::Malicious || (!u.new.is_empty() && r.version == u.new))
+        .filter(|r| !u.new.is_empty() && r.version == u.new)
         .map_or(Category::Missing, |r| r.category);
-    if ctx.state.aur_malicious.contains_key(&u.name) {
+    if ctx.state.is_malicious(&u.name, &u.new) {
         return (Category::Malicious, Policy::Block);
     }
     let policy = ctx.settings.screening_policy(category);
@@ -59,8 +59,8 @@ pub(super) fn heading(category: Category, policy: Policy) -> String {
 }
 
 pub(super) fn decision_label(ctx: &Ctx, pending: &Pending, u: &Update) -> Option<&'static str> {
-    if !ctx.state.aur_malicious.contains_key(&u.name) && ctx.state.aur_holds.contains_key(&u.name) {
-        return Some(t("Quarantined"));
+    if !ctx.state.is_malicious(&u.name, &u.new) && ctx.state.aur_holds.contains_key(&u.name) {
+        return Some(t("Deferred"));
     }
     pending
         .screens
@@ -74,19 +74,21 @@ pub(super) fn decision_label(ctx: &Ctx, pending: &Pending, u: &Update) -> Option
         .map(|_| t("Approved"))
 }
 
-pub(super) fn actions(ctx: &Ctx) -> Vec<Act> {
-    let mut acts = Vec::new();
+pub(super) fn system_action(ctx: &Ctx) -> Option<Act> {
     let pending = ctx.shared.updates.ready();
-    if pending
+    pending
         .is_none_or(|p| p.updates.iter().any(|u| u.source != Source::Aur) || !p.failed.is_empty())
-    {
-        acts.push(
+        .then(|| {
             Act::new(t("Update official packages and Flatpaks"), |ctx| {
                 Flow::Push(start(Job::new(op::UPGRADE_RUN, vec!["system".into()]), ctx))
             })
-            .icon(icon::UPDATE),
-        );
-    }
+            .icon(icon::UPDATE)
+        })
+}
+
+pub(super) fn actions(ctx: &Ctx) -> Vec<Act> {
+    let pending = ctx.shared.updates.ready();
+    let mut acts: Vec<_> = system_action(ctx).into_iter().collect();
     if let Some(pending) = pending.filter(|p| p.updates.iter().any(|u| u.source == Source::Aur)) {
         let mut clean = BTreeMap::new();
         let mut approved = BTreeMap::new();
@@ -240,9 +242,9 @@ impl PackageReport {
 #[derive(Clone, Copy)]
 enum Decision {
     Approve,
-    Hold,
+    Defer,
     Revoke,
-    Release,
+    CancelDeferral,
 }
 
 impl Decision {
@@ -252,10 +254,12 @@ impl Decision {
                 inspectable(name, report, &ctx.settings, state)
                     && state.aur_trust.get(name) != Some(report)
             }
-            Self::Hold => inspectable(name, report, &ctx.settings, state),
+            Self::Defer => inspectable(name, report, &ctx.settings, state),
             Self::Revoke => state.aur_trust.get(name) == Some(report),
-            Self::Release => {
-                report.category != Category::Malicious && state.aur_holds.contains_key(name)
+            Self::CancelDeferral => {
+                report.category != Category::Malicious
+                    && !state.is_malicious(name, &report.version)
+                    && state.aur_holds.contains_key(name)
             }
         }
     }
@@ -265,9 +269,9 @@ impl Decision {
         let report = report.clone();
         let label = match self {
             Self::Approve => t("Approve this version and its findings"),
-            Self::Hold => t("Quarantine until findings clear"),
+            Self::Defer => t("Defer this update"),
             Self::Revoke => t("Revoke approval"),
-            Self::Release => t("Release from quarantine"),
+            Self::CancelDeferral => t("Cancel deferral"),
         };
         Act::new(label, move |ctx| {
             if !ctx.settings.aur_screening
@@ -289,14 +293,14 @@ impl Decision {
                     Self::Approve => {
                         state.aur_trust.insert(name.clone(), report.clone());
                     }
-                    Self::Hold => {
+                    Self::Defer => {
                         state.aur_trust.remove(&name);
                         state.aur_holds.insert(name.clone(), report.version.clone());
                     }
                     Self::Revoke => {
                         state.aur_trust.remove(&name);
                     }
-                    Self::Release => {
+                    Self::CancelDeferral => {
                         state.aur_holds.remove(&name);
                     }
                 }
@@ -320,54 +324,45 @@ impl Decision {
 }
 
 fn sources(body: &mut Vec<Block>, ctx: &Ctx, report: Option<&Report>, u: &Update) {
-    for scanner in Scanner::ALL {
-        let enabled = ctx.settings.aur_screening && ctx.settings.scanner_enabled(scanner);
-        let mut evidence: Vec<_> = report
-            .into_iter()
-            .flat_map(|r| &r.evidence)
-            .filter(|e| e.scanner == scanner && (enabled || e.category == Category::Malicious))
-            .collect();
-        if let Some(stored) = ctx
-            .state
-            .aur_malicious
-            .get(&u.name)
-            .and_then(|records| records.get(&scanner))
-            && !evidence.iter().any(|e| e.category == Category::Malicious)
+    let live = report
+        .filter(|r| r.version == u.new)
+        .into_iter()
+        .flat_map(|r| &r.evidence)
+        .filter(|e| {
+            e.matches_candidate(&u.new)
+                && ((ctx.settings.aur_screening && ctx.settings.scanner_enabled(e.scanner))
+                    || e.category == Category::Malicious)
+        });
+    let mut shown: Vec<_> = live.collect();
+    // A disabled or temporarily unavailable source can still explain a saved
+    // block for this exact candidate.
+    for saved in ctx.state.malicious_evidence(&u.name, &u.new) {
+        if !shown
+            .iter()
+            .any(|e| e.scanner == saved.scanner && e.category == Category::Malicious)
         {
-            evidence.push(stored);
+            shown.push(saved);
         }
-        if evidence.is_empty() && !enabled {
-            continue;
-        }
+    }
+    if shown.is_empty() {
+        body.push(Block::Text(
+            t("No scan is available for this version.").into(),
+            Tone::Muted,
+        ));
+        return;
+    }
+    shown.sort_by_key(|e| e.scanner);
+    for e in shown {
         body.push(Block::Blank);
-        body.push(Block::Heading(scanner.label().into()));
-        if evidence.is_empty() {
-            body.push(Block::Text(
-                t("No report is available.").into(),
-                Tone::Muted,
-            ));
-        }
-        for e in evidence {
-            let version = e.version.as_deref().unwrap_or(t("Unreported"));
-            let tone = if e.version.as_deref() == Some(u.new.as_str()) {
-                Tone::Normal
-            } else {
-                Tone::Warn
-            };
-            body.push(Block::Field(
-                t("Scanned version").into(),
-                version.into(),
-                tone,
-            ));
-            body.push(Block::Text(e.summary.clone(), Tone::Normal));
-            body.extend(
-                e.findings
-                    .iter()
-                    .map(|f| Block::Note(Lead::Bullet, f.clone(), Tone::Normal)),
-            );
-            if !e.url.is_empty() {
-                body.push(Block::Text(e.url.clone(), Tone::Accent));
-            }
+        body.push(Block::Heading(e.scanner.label().into()));
+        body.push(Block::Text(e.summary.clone(), Tone::Normal));
+        body.extend(
+            e.findings
+                .iter()
+                .map(|f| Block::Note(Lead::Bullet, f.clone(), Tone::Normal)),
+        );
+        if !e.url.is_empty() {
+            body.push(Block::Link(e.url.clone()));
         }
     }
 }
@@ -451,8 +446,8 @@ impl Page for PackageReport {
             for decision in [
                 Decision::Approve,
                 Decision::Revoke,
-                Decision::Release,
-                Decision::Hold,
+                Decision::CancelDeferral,
+                Decision::Defer,
             ] {
                 if c != Category::Malicious
                     && decision.available(&self.name, report, ctx, &ctx.state)
@@ -469,6 +464,9 @@ impl Page for PackageReport {
         }
         self.detail.set(body, acts);
         self.detail.draw(area, buf, ctx);
+    }
+    fn click(&mut self, x: u16, y: u16, ctx: &mut Ctx) -> Flow {
+        self.detail.click(x, y, ctx)
     }
     fn key(&mut self, key: Key, ctx: &mut Ctx) -> Flow {
         self.detail.key(key, ctx)
@@ -558,7 +556,7 @@ mod tests {
             ("No findings (2)", Category::Clean),
             ("Inspect: Minor findings (1)", Category::Minor),
             ("Blocked: Suspicious findings (1)", Category::Suspicious),
-            ("Inspect: Missing scan (1)", Category::Missing),
+            ("Deferred: Missing scan (1)", Category::Missing),
             ("Blocked: Confirmed malicious (1)", Category::Malicious),
         ];
         let mut last = 0;
@@ -576,7 +574,11 @@ mod tests {
             assert_eq!(cell.fg, app.ctx.style.color(Tone::Screening(c)));
             assert!(!colors.contains(&cell.fg));
             colors.push(cell.fg);
-            assert!(lines[y + 1].chars().position(|c| c == '↑').unwrap() > x);
+            let glyph = icon::ARCH.chars().next().unwrap();
+            let icon_x = lines[y + 1].chars().position(|c| c == glyph).unwrap();
+            assert!(icon_x > x);
+            let cell = &term.backend().buffer()[(icon_x as u16, (y + 1) as u16)];
+            assert_eq!(cell.fg, app.ctx.style.color(Tone::Muted));
             assert!(lines[y + 1].contains("1-1  →  2-1"));
         }
         let labels: Vec<_> = actions(&app.ctx).into_iter().map(|a| a.label).collect();
@@ -591,8 +593,8 @@ mod tests {
         );
         app.ctx
             .settings
-            .set_screening_policy(Category::Missing, Policy::Defer);
-        assert!(screen(&mut app, &mut term).contains("Deferred: Missing scan (1)"));
+            .set_screening_policy(Category::Missing, Policy::Inspect);
+        assert!(screen(&mut app, &mut term).contains("Inspect: Missing scan (1)"));
         // Filtering narrows counts within each visible group and hides empty headings.
         press(&mut app, &[Key::Char('f')]);
         for c in "simple-tool".chars() {
@@ -609,9 +611,16 @@ mod tests {
         configure(&mut app.ctx);
         let name = "screen-ui-minor-example";
         let mut p = parse(&format!("aur\t{name}\t1-1\t2-1\n"));
-        let mut r = report(Category::Minor);
-        r.evidence[1].version = Some("1-1".into());
-        r.evidence[1].summary = "Prior version assessed".into();
+        let current = report(Category::Minor).evidence.remove(0);
+        let previous = Evidence {
+            scanner: Scanner::Aurwatch,
+            version: Some("1-1".into()),
+            category: Category::Suspicious,
+            summary: "Historical fixture".into(),
+            findings: vec!["Old warning".into()],
+            url: "https://example.org/old".into(),
+        };
+        let r = Report::new("2-1", vec![current, previous]);
         p.screens.insert(name.into(), r.clone());
         app.ctx.shared.updates = Loaded::Ready(p);
         let mut term = Terminal::new(TestBackend::new(88, 42)).unwrap();
@@ -619,20 +628,49 @@ mod tests {
         let shown = screen(&mut app, &mut term);
         for text in [
             "WTAKO fixture",
-            "Prior version assessed",
             "2-1",
-            "1-1",
             "WTAKO AUR Audit",
-            "AURWatch",
             "Check the recipe",
             "https://example.org/first",
-            "https://example.org/second",
             "Approve this version and its findings",
         ] {
             assert!(shown.contains(text), "{text}: {shown}");
         }
+        for hidden in [
+            "Historical fixture",
+            "Old warning",
+            "1-1",
+            "AURWatch",
+            "https://example.org/old",
+        ] {
+            assert!(!shown.contains(hidden), "{hidden}: {shown}");
+        }
+        press(&mut app, &[Key::Tab]);
+        let focused = screen(&mut app, &mut term);
+        assert!(
+            focused.contains("select link") && focused.contains("open"),
+            "{focused}"
+        );
+        press(&mut app, &[Key::BackTab]);
+        screen(&mut app, &mut term);
         press(&mut app, &[Key::Enter]);
         assert_eq!(State::load().aur_trust.get(name), Some(&r));
+        let mut evidence_blocks = Vec::new();
+        let pending = app.ctx.shared.updates.ready().unwrap();
+        sources(
+            &mut evidence_blocks,
+            &app.ctx,
+            pending.screens.get(name),
+            &pending.updates[0],
+        );
+        let links: Vec<_> = evidence_blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Link(url) => Some(url.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(links, ["https://example.org/first"]);
         let mut action = actions(&app.ctx)
             .into_iter()
             .find(|a| a.label == "Update approved AUR packages")
@@ -655,6 +693,79 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_current_report_has_one_message_and_no_links_to_older_scans() {
+        let (mut app, mut term) = app();
+        configure(&mut app.ctx);
+        let name = "example-without-current-report";
+        let mut p = parse(&format!("aur\t{name}\t1-1\t2-1\n"));
+        let mut old = report(Category::Malicious).evidence.remove(0);
+        old.version = Some("1-1".into());
+        let previous = Report::new("1-1", vec![old.clone()]);
+        app.ctx
+            .state
+            .observe_malicious(&BTreeMap::from([(name.into(), previous)]), None);
+        let unversioned = Evidence {
+            scanner: Scanner::Aurwatch,
+            version: None,
+            category: Category::Minor,
+            summary: "Unversioned fixture".into(),
+            findings: vec!["Old warning".into()],
+            url: "https://example.org/other".into(),
+        };
+        let mut current = Report::new("2-1", vec![old.clone(), unversioned.clone()]);
+        // An old persisted report may still have its original provider payloads.
+        current.evidence = vec![old, unversioned];
+        let mut body = Vec::new();
+        sources(&mut body, &app.ctx, Some(&current), &p.updates[0]);
+        assert_eq!(
+            body,
+            [Block::Text(
+                "No scan is available for this version.".into(),
+                Tone::Muted
+            )]
+        );
+        p.screens.insert(name.into(), current);
+        app.ctx.shared.updates = Loaded::Ready(p);
+        open(&mut app, Box::new(PackageReport::new(name.into())));
+        let shown = screen(&mut app, &mut term);
+        assert!(shown.contains("Deferred: Missing scan"), "{shown}");
+        assert!(
+            !shown.contains("WTAKO fixture")
+                && !shown.contains("example.org")
+                && !shown.contains("Approve this version"),
+            "{shown}"
+        );
+        assert_eq!(
+            shown
+                .matches("No scan is available for this version.")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn manual_deferral_can_be_canceled_from_the_package_report() {
+        let (mut app, mut term) = app();
+        configure(&mut app.ctx);
+        let name = "screen-ui-deferral-example";
+        let mut p = parse(&format!("aur\t{name}\t1-1\t2-1\n"));
+        p.screens.insert(name.into(), report(Category::Minor));
+        app.ctx.shared.updates = Loaded::Ready(p);
+        open(&mut app, Box::new(PackageReport::new(name.into())));
+        assert!(screen(&mut app, &mut term).contains("Defer this update"));
+        press(&mut app, &[Key::Down, Key::Enter]);
+        assert!(State::load().aur_holds.contains_key(name));
+        open(&mut app, Box::new(PackageReport::new(name.into())));
+        let shown = screen(&mut app, &mut term);
+        assert!(
+            shown.contains("Deferred: Minor findings") && shown.contains("Cancel deferral"),
+            "{shown}"
+        );
+        press(&mut app, &[Key::Enter]);
+        assert!(!State::load().aur_holds.contains_key(name));
+    }
+
+    #[test]
     fn confirmed_malicious_has_no_per_package_or_bulk_install_override() {
         let (mut app, mut term) = app();
         example_reports(&mut app.ctx);
@@ -669,7 +780,7 @@ mod tests {
         for forbidden in [
             "Approve this version",
             "Install this AUR update",
-            "Release from quarantine",
+            "Cancel deferral",
             "Revoke approval",
         ] {
             assert!(!shown.contains(forbidden), "{shown}");
@@ -705,11 +816,10 @@ mod tests {
         let (mut app, mut term) = app();
         example_reports(&mut app.ctx);
         let name = "example-compromised";
-        let retained = report(Category::Malicious).evidence.remove(0);
-        app.ctx
-            .state
-            .aur_malicious
-            .insert(name.into(), BTreeMap::from([(Scanner::Wtako, retained)]));
+        app.ctx.state.observe_malicious(
+            &BTreeMap::from([(name.into(), report(Category::Malicious))]),
+            None,
+        );
         app.ctx.settings.aur_screening = false;
         app.ctx.settings.set_scanner_enabled(Scanner::Wtako, false);
         if let Loaded::Ready(p) = &mut app.ctx.shared.updates {
@@ -730,8 +840,33 @@ mod tests {
             "{shown}"
         );
         assert!(
-            !shown.contains("Approve this version") && !shown.contains("No report is available.")
+            !shown.contains("Approve this version")
+                && !shown.contains("No scan is available for this version.")
         );
+    }
+
+    #[test]
+    fn an_old_block_allows_guarded_updates_with_an_independent_system_action() {
+        let (mut app, mut term) = app();
+        example_reports(&mut app.ctx);
+        let name = "example-compromised";
+        app.ctx.state.observe_malicious(
+            &BTreeMap::from([(name.into(), report(Category::Malicious))]),
+            None,
+        );
+        app.ctx.settings.aur_screening = false;
+        if let Loaded::Ready(p) = &mut app.ctx.shared.updates {
+            p.screens.clear();
+            p.updates.iter_mut().find(|u| u.name == name).unwrap().new = "3-1".into();
+        }
+        open(&mut app, Box::new(UpgradePage::new()));
+        let shown = screen(&mut app, &mut term);
+        assert!(
+            shown.contains("Install now")
+                && shown.contains("Update official packages and Flatpaks"),
+            "{shown}"
+        );
+        assert!(!shown.contains("Confirmed malicious"));
     }
 
     #[test]

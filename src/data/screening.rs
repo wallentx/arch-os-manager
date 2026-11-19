@@ -1,5 +1,6 @@
 //! Public scanner evidence and authorization for a selected AUR update.
 
+pub mod guard;
 mod sources;
 mod wtako;
 
@@ -123,44 +124,38 @@ pub struct Evidence {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Report {
     pub version: String,
-    // Older state files stored one WTAKO report. Its empty evidence cannot authorize an update.
+    /// All sources consulted, including those with no report for the candidate.
+    #[serde(default)]
+    pub sources: Vec<Scanner>,
     #[serde(default)]
     pub category: Category,
     #[serde(default)]
     pub evidence: Vec<Evidence>,
 }
 
-impl Report {
-    pub fn new(version: &str, evidence: Vec<Evidence>) -> Self {
-        let mut report = Self {
-            version: version.into(),
-            category: Category::Missing,
-            evidence,
-        };
-        report.category = report.classify();
-        report
+impl Evidence {
+    pub fn matches_candidate(&self, version: &str) -> bool {
+        !version.is_empty()
+            && self.version.as_deref() == Some(version)
+            && self.category != Category::Missing
     }
+}
 
-    fn classify(&self) -> Category {
-        let mut category = Category::Missing;
-        for item in &self.evidence {
-            if item.category == Category::Malicious {
-                return Category::Malicious;
-            }
-            let exact = item.version.as_deref() == Some(&self.version) && !self.version.is_empty();
-            if item.version.is_some() && !exact {
-                continue;
-            }
-            match item.category {
-                Category::Suspicious => category = Category::Suspicious,
-                Category::Minor if category != Category::Suspicious => category = Category::Minor,
-                Category::Clean if exact && category == Category::Missing => {
-                    category = Category::Clean
-                }
-                _ => {}
-            }
+impl Report {
+    pub fn new(version: &str, mut evidence: Vec<Evidence>) -> Self {
+        let sources = evidence.iter().map(|item| item.scanner).collect();
+        evidence.retain(|item| item.matches_candidate(version));
+        let category = evidence
+            .iter()
+            .map(|item| item.category)
+            .max()
+            .unwrap_or(Category::Missing);
+        Self {
+            version: version.into(),
+            sources,
+            category,
+            evidence,
         }
-        category
     }
 }
 
@@ -181,12 +176,22 @@ fn active_report(name: &str, report: &Report, settings: &Settings, state: &State
         .peekable();
     settings.aur_screening
         && enabled.peek().is_some()
-        && enabled.eq(report.evidence.iter().map(|e| e.scanner))
+        && enabled.eq(report.sources.iter().copied())
         && !report.version.is_empty()
-        && report.classify() == report.category
+        && report
+            .evidence
+            .iter()
+            .all(|e| e.matches_candidate(&report.version) && settings.scanner_enabled(e.scanner))
+        && report
+            .evidence
+            .iter()
+            .map(|e| e.category)
+            .max()
+            .unwrap_or(Category::Missing)
+            == report.category
         && report.category != Category::Malicious
         && !state.aur_holds.contains_key(name)
-        && !state.aur_malicious.contains_key(name)
+        && !state.is_malicious(name, &report.version)
         && !state.deferred(name, settings)
 }
 
@@ -349,11 +354,7 @@ fn still_approved(expected: &Report, fresh: &Report) -> bool {
         || (expected.category == Category::Clean
             && fresh.category == Category::Clean
             && expected.version == fresh.version
-            && expected
-                .evidence
-                .iter()
-                .map(|e| e.scanner)
-                .eq(fresh.evidence.iter().map(|e| e.scanner)))
+            && expected.sources == fresh.sources)
 }
 
 fn arguments(
@@ -377,7 +378,7 @@ fn arguments(
         if found.next().is_some()
             || !package_name(name)
             || !package_name(&package.package_base)
-            || state.aur_malicious.contains_key(&package.package_base)
+            || state.is_malicious(&package.package_base, &report.version)
             || package.version != report.version
             || report.version.len() > 200
             || report
@@ -436,13 +437,9 @@ pub fn verify(expected: &BTreeMap<String, Report>) -> Result<Vec<String>, crate:
     }) {
         return Err(rejected());
     }
-    arguments(
-        expected,
-        &fresh,
-        &settings()?,
-        &State::try_load().map_err(|_| rejected())?,
-        &packages,
-    )
+    let state = State::try_load().map_err(|_| rejected())?;
+    let args = arguments(expected, &fresh, &settings()?, &state, &packages)?;
+    guard::finalize(args, &state, &packages)
 }
 
 #[cfg(test)]
@@ -472,24 +469,28 @@ mod tests {
     }
 
     #[test]
-    fn aggregation_preserves_old_reports_and_weighs_current_observations() {
+    fn no_risk_level_counts_without_an_exact_candidate_version() {
         use Category::*;
-        let mut evidence = vec![
-            observed(Scanner::Wtako, Suspicious, Some("old")),
-            observed(Scanner::Aurwatch, Clean, None),
-            observed(Scanner::Pkglint, Missing, None),
-        ];
-        let historical = Report::new("new", evidence.clone());
-        assert_eq!(historical.category, Missing);
-        assert_eq!(historical.evidence, evidence);
-        evidence.push(observed(Scanner::Cretezy, Clean, Some("new")));
-        assert_eq!(Report::new("new", evidence.clone()).category, Clean);
-        evidence[1].category = Minor;
-        assert_eq!(Report::new("new", evidence.clone()).category, Minor);
-        evidence[1].category = Suspicious;
-        assert_eq!(Report::new("new", evidence.clone()).category, Suspicious);
-        evidence[0].category = Malicious;
-        assert_eq!(Report::new("new", evidence).category, Malicious);
+        let candidate = "1.5.11_6132547114106880-1";
+        for category in [Clean, Minor, Suspicious, Malicious, Missing] {
+            let absent = Report::new(
+                candidate,
+                vec![
+                    observed(Scanner::Wtako, category, Some("1.5.9_4515810895593472-1")),
+                    observed(Scanner::Aurwatch, category, None),
+                    observed(Scanner::AurReview, category, Some("1.5.11")),
+                ],
+            );
+            assert!(absent.evidence.is_empty());
+            assert_eq!(absent.category, Missing);
+            assert_eq!(absent.sources.len(), 3);
+            let exact = Report::new(
+                candidate,
+                vec![observed(Scanner::Wtako, category, Some(candidate))],
+            );
+            assert_eq!(exact.category, category);
+            assert_eq!(exact.evidence.is_empty(), category == Missing);
+        }
     }
 
     #[test]

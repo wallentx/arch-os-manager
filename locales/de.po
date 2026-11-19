@@ -1449,11 +1449,11 @@ msgstr "Gruppe"
 msgid "Official updates are pending\nInstall the official updates before updating selected AUR packages.\n"
 msgstr "Offizielle Updates stehen aus\nVor den ausgewählten AUR-Paketen die offiziellen Updates installieren.\n"
 
-msgid "Quarantine until findings clear"
-msgstr "Bis zur Entwarnung in Quarantäne halten"
+msgid "Defer this update"
+msgstr "Dieses Update zurückstellen"
 
-msgid "Release from quarantine"
-msgstr "Aus der Quarantäne entlassen"
+msgid "Cancel deferral"
+msgstr "Zurückstellung aufheben"
 
 msgid "This update is no longer pending."
 msgstr "Dieses Update steht nicht mehr aus."
@@ -1539,20 +1539,17 @@ msgstr "Fehlender Prüfbericht"
 msgid "No findings"
 msgstr "Ohne Befund"
 
-msgid "No report is available."
-msgstr "Es liegt kein Prüfbericht vor."
+msgid "No scan is available for this version."
+msgstr "Für diese Version liegt kein Prüfbericht vor."
 
-msgid "Quarantined"
-msgstr "In Quarantäne"
+msgid "Deferred"
+msgstr "Zurückgestellt"
 
 msgid "Revoke approval"
 msgstr "Freigabe widerrufen"
 
 msgid "Scan sources"
 msgstr "Prüfquellen"
-
-msgid "Scanned version"
-msgstr "Geprüfte Version"
 
 msgid "Screen pending AUR updates"
 msgstr "Ausstehende AUR-Updates prüfen"
@@ -1562,9 +1559,6 @@ msgstr "Verdächtige Befunde"
 
 msgid "The update waits for a clean scan."
 msgstr "Das Update wartet auf eine Prüfung ohne Befund."
-
-msgid "Unreported"
-msgstr "Nicht angegeben"
 
 msgid "Update approved AUR packages"
 msgstr "Freigegebene AUR-Pakete aktualisieren"
@@ -1589,3 +1583,12 @@ msgstr "AUR-Prüfquellen werden abgefragt"
 
 msgid "No scan sources are enabled."
 msgstr "Es sind keine Prüfquellen aktiviert."
+
+msgid "select link"
+msgstr "Link auswählen"
+
+msgid "Opening the scan report"
+msgstr "Prüfbericht wird geöffnet"
+
+msgid "Could not open the scan report\n"
+msgstr "Der Prüfbericht konnte nicht geöffnet werden\n"

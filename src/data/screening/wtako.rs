@@ -1,10 +1,10 @@
-//! WTAKO returns the most recent report by name, which may describe an older version.
+//! WTAKO reports the assessed package version separately from its scan flags.
 
 use super::{Category, Evidence, Scanner};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-fn report(name: &str, entry: Option<&Value>) -> Evidence {
+fn report(name: &str, candidate: &str, entry: Option<&Value>) -> Evidence {
     let mut evidence = Evidence {
         scanner: Scanner::Wtako,
         version: None,
@@ -16,9 +16,12 @@ fn report(name: &str, entry: Option<&Value>) -> Evidence {
             percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC)
         ),
     };
-    let Some(e) =
-        entry.filter(|e| e["packageName"].as_str() == Some(name) && e["status"] == "scanned")
-    else {
+    let Some(e) = entry.filter(|e| {
+        !candidate.is_empty()
+            && e["packageName"].as_str() == Some(name)
+            && e["status"] == "scanned"
+            && e["version"].as_str() == Some(candidate)
+    }) else {
         return evidence;
     };
     let clean_text = |v: &str| {
@@ -28,10 +31,7 @@ fn report(name: &str, entry: Option<&Value>) -> Evidence {
                 c.is_control() || matches!(c,'\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
             })
     };
-    evidence.version = e["version"]
-        .as_str()
-        .filter(|v| clean_text(v))
-        .map(str::to_owned);
+    evidence.version = Some(candidate.into());
     let mut findings = Vec::new();
     let mut complete = true;
     let mut category = Category::Clean;
@@ -117,18 +117,19 @@ pub(super) fn lookup(packages: &[(String, String)]) -> BTreeMap<String, Evidence
         let response = crate::script::query(crate::script::op::UPGRADE_AUDIT, &[&names])
             .ok()
             .and_then(|s| serde_json::from_str::<Value>(&s).ok());
-        for (name, _) in batch {
+        for (name, version) in batch {
             results.insert(
                 name.clone(),
                 report(
                     name,
+                    version,
                     response.as_ref().and_then(|v| v["packages"].get(name)),
                 ),
             );
         }
     }
-    for (name, _) in remaining {
-        results.insert(name.clone(), report(name, None));
+    for (name, version) in remaining {
+        results.insert(name.clone(), report(name, version, None));
     }
     results
 }
@@ -146,15 +147,28 @@ mod tests {
             ("blackFlags", Category::Malicious),
         ] {
             item[field] = json!(["finding"]);
-            let got = report("example", Some(&item));
+            let got = report("example", "1-1", Some(&item));
             assert_eq!(got.version.as_deref(), Some("1-1"));
             assert_eq!(got.category, cat);
             assert!(!got.findings.is_empty());
         }
+        let stale = report("example", "2-1", Some(&item));
+        assert_eq!(stale.category, Category::Missing);
+        assert!(stale.findings.is_empty());
+        assert_eq!(stale.version, None);
         item["blackFlags"] = json!(["escape\u{001b}"]);
-        assert_eq!(report("example", Some(&item)).category, Category::Malicious);
+        assert_eq!(
+            report("example", "1-1", Some(&item)).category,
+            Category::Malicious
+        );
         item["blackFlags"] = Value::Null;
-        assert_eq!(report("example", Some(&item)).category, Category::Missing);
-        assert_eq!(report("different", Some(&item)).category, Category::Missing);
+        assert_eq!(
+            report("example", "1-1", Some(&item)).category,
+            Category::Missing
+        );
+        assert_eq!(
+            report("different", "1-1", Some(&item)).category,
+            Category::Missing
+        );
     }
 }

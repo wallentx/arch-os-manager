@@ -57,9 +57,11 @@ fn field(value: &Value, key: &str) -> Option<String> {
     plain(value.get(key)?.as_str()?)
 }
 
-fn watch(doc: &str, name: &str) -> Option<Evidence> {
+fn watch(doc: &str, name: &str, candidate: &str) -> Option<Evidence> {
     let record: Value = serde_json::from_str(doc).ok()?;
-    if record["pkg"].as_str()? != name {
+    // Today's public API normally omits the assessed version. The scan time and
+    // the package name alone cannot identify the recipe it assessed.
+    if record["pkg"].as_str()? != name || record["scanned_version"].as_str()? != candidate {
         return None;
     }
     let severity = record["status"].as_str()?;
@@ -92,7 +94,7 @@ fn watch(doc: &str, name: &str) -> Option<Evidence> {
     }
     Some(Evidence {
         scanner: Scanner::Aurwatch,
-        version: None,
+        version: Some(candidate.into()),
         category,
         summary: format!("{severity} · scanned {}", field(&record, "last_scanned")?),
         findings,
@@ -100,17 +102,29 @@ fn watch(doc: &str, name: &str) -> Option<Evidence> {
     })
 }
 
-fn one(scanner: Scanner, name: &str, candidate: &str, deadline: Instant) -> Evidence {
+fn one(
+    scanner: Scanner,
+    name: &str,
+    candidate: &str,
+    deadline: Instant,
+    sleuth_entry: Option<&Value>,
+) -> Evidence {
     let fallback = |why| missing(scanner, name, why);
     if !super::package_name(name) {
         return fallback("Invalid package name");
     }
-    let Some(response) = fetch(&[scanner.id(), name]) else {
+    let response = if scanner == Scanner::AurSleuth {
+        fetch(&[scanner.id(), name, "reports"])
+    } else {
+        fetch(&[scanner.id(), name])
+    };
+    let Some(response) = response else {
         return fallback("No report returned (service unavailable or package not covered)");
     };
     let report = match scanner {
-        Scanner::Aurwatch => watch(&response, name),
-        Scanner::Pkglint => pages::lint(&response, name),
+        Scanner::AurSleuth => sleuth::report(name, candidate, &response, sleuth_entry),
+        Scanner::Aurwatch => watch(&response, name, candidate),
+        Scanner::Pkglint => pages::lint(&response, name, candidate),
         Scanner::AurReview => pages::ai(&response, name, candidate, deadline),
         Scanner::Cretezy => pages::cretezy(&response, name, candidate, deadline),
         _ => None,
@@ -126,10 +140,10 @@ pub(super) fn lookup(scanner: Scanner, updates: &[(String, String)]) -> BTreeMap
     if updates.is_empty() {
         return BTreeMap::new();
     }
-    if scanner == Scanner::AurSleuth {
-        return sleuth::lookup(updates);
-    }
     let deadline = Instant::now() + BUDGET;
+    let index = (scanner == Scanner::AurSleuth)
+        .then(sleuth::index)
+        .flatten();
     let next = AtomicUsize::new(0);
     let mut reports = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..updates.len().min(2))
@@ -142,7 +156,16 @@ pub(super) fn lookup(scanner: Scanner, updates: &[(String, String)]) -> BTreeMap
                         else {
                             break;
                         };
-                        entries.push((name.clone(), one(scanner, name, candidate, deadline)));
+                        entries.push((
+                            name.clone(),
+                            one(
+                                scanner,
+                                name,
+                                candidate,
+                                deadline,
+                                index.as_ref().and_then(|v| v.get(name)),
+                            ),
+                        ));
                     }
                     entries
                 })
@@ -166,14 +189,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn watch_preserves_unversioned_rule_matches_and_rejects_mismatched_records() {
+    fn watch_requires_an_explicit_matching_assessed_version() {
         let body = r#"{"pkg":"pkg","status":"medium","last_scanned":"2026-11-18","rules":[{"name":"Permission","severity":"medium","message":"Check setgid","matches":[{"file":".install","line":17,"text":"chmod g+s file"}]}]}"#;
-        let e = watch(body, "pkg").unwrap();
+        assert!(watch(body, "pkg", "2-1").is_none());
+        let versioned = body.replace(r#""pkg":"pkg""#, r#""pkg":"pkg","scanned_version":"2-1""#);
+        let e = watch(&versioned, "pkg", "2-1").unwrap();
         assert_eq!(e.category, Category::Suspicious);
-        assert!(e.version.is_none());
+        assert_eq!(e.version.as_deref(), Some("2-1"));
         assert_eq!(e.findings[1], ".install:17: chmod g+s file");
-        assert!(watch(body, "otherpkg").is_none());
-        assert!(watch(&body.replace("medium", "clean"), "pkg").is_none());
+        assert!(watch(&versioned, "otherpkg", "2-1").is_none());
+        assert!(watch(&versioned.replace("medium", "clean"), "pkg", "2-1").is_none());
         assert!(plain("\u{1b}[1m unsafe").is_none());
     }
 }

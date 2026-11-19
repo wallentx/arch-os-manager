@@ -151,6 +151,11 @@ impl App {
                 };
                 self.apply(flow);
             }
+            Msg::Click(x, y) => {
+                if self.ctx.shown.0 == top {
+                    self.deliver(top, |page, ctx| page.click(x, y, ctx));
+                }
+            }
             Msg::Tick => {
                 self.ctx.page = top;
                 if let Some((_, page)) = self.pages.last_mut() {

@@ -87,25 +87,27 @@ Open **Settings › AUR update screening** and turn on **Screen pending AUR upda
 | Green · No findings | You can update the group or an individual package. |
 | Gray · Minor findings | Inspect the reports before approving the update. |
 | Yellow · Suspicious findings | The manager blocks the update. |
-| Orange · Missing scan | Inspect the available evidence, including older reports, before approving the update. |
+| Orange · Missing scan | The manager defers the update until a clean scan arrives. |
 | Red · Confirmed malicious | The manager blocks the update. This policy is fixed. |
 
 <img src="screenshots/aur-screening.png" width="720" alt="The Update page groups example AUR packages by severity and offers separate actions for official updates, clean AUR updates and inspection.">
 
-**Inspect AUR findings** shows each selected source, its native verdict, its findings, the assessed version when available, and the report address. For services that index recipes by package base, the manager uses the AUR’s version-matched base name for split packages and identifies it in the report. The official package list appears while screening is in progress. If a service has no report, changes its page format, or times out, the other sources still contribute their results.
+**Inspect AUR findings** shows reports that identify the complete pending version, including the epoch and package release when present. Each report shows its source, native verdict, and findings. Click its link to open it in your default browser, or select it with **Tab** and press **Enter**. When no source identifies the pending version, the package appears under **Deferred: Missing scan** with the default policy.
+
+For services that index recipes by package base, the manager uses the AUR’s version-matched base name for split packages. Official updates remain available while scans run. A service that times out or returns an older or unversioned assessment contributes no report for that candidate.
 
 | Source | Evidence displayed |
 |---|---|
 | [WTAKO AUR Audit](https://wtako.net/services/aur-audit/docs) | The API returns the assessed version and individual flags. Yellow flags indicate minor findings, red flags indicate suspicious findings, and black flags identify confirmed malicious findings. |
-| [AURWatch](https://aurwatch.org/) | The report includes severity, triggered rules, and scan time. Low severity maps to minor, and medium or high severity maps to suspicious. The public lookup omits the scanned version. |
+| [AURWatch](https://aurwatch.org/) | Its current lookup omits the assessed version, so these results cannot qualify for a pending update. |
 | [pkglint AUR Report Card](https://jamison.lahman.dev/pkglint/index.html) | The report supplies the assessed version, packaging hygiene grade, and lint findings. Errors and critical lint findings warrant inspection as suspicious. |
 | [AUR AI Reviewer](https://aur-review.com/) | Version-specific reviews score individual changes from 0 to 5. Scores 1–2 map to minor and 3–5 to suspicious. |
-| [AUR Sleuth](https://mgalgs.io/aur-sleuth/) | The published package state includes the audit and judge verdicts. A disputed report or a request for further inspection maps to suspicious. A confirmed verdict blocks installation. |
+| [AUR Sleuth](https://mgalgs.io/aur-sleuth/) | The manager reads the audits for the pending version. A provider-confirmed verdict blocks the release when its audits and the judge’s decision identify that same version. |
 | [Cretezy AUR Security](https://aur-security.cretezy.com/) | Commit-specific reports include the version, verdict, and available explanation. Suspicious and dangerous verdicts map to suspicious. |
 
-The manager shows **No findings** when at least one enabled source reports a clean assessment for the candidate version and no applicable source raises a concern. An unversioned finding can raise the severity. An unversioned clean report or a clean report for an older version can inform inspection but cannot clear the update on its own. A confirmed malicious verdict takes precedence, including when it appears in a historical report. Scanner agreement on a version does not identify every change published under that version.
+The manager shows **No findings** when at least one enabled source has a clean assessment for the candidate version and no matching assessment raises a concern. The most severe matching finding determines the category. A confirmed malicious finding blocks that release even when its source later becomes unavailable or is disabled.
 
-**Inspect** lets you approve the specific version and evidence you reviewed. **Defer** keeps a package out of installation until a matching clean scan arrives or you change the policy that deferred it. **Block** disables approval while that category applies. You can also quarantine an individual update during inspection. The manager remembers confirmed malicious reports across restarts, outages, and source changes. Only a clean report for the candidate version from the source that raised the block can clear that source's finding. Turning off screening while a confirmed finding is remembered still permits official and Flatpak updates. Re-enable screening to select other eligible AUR packages.
+**Inspect** lets you approve the specific version and evidence you reviewed. **Defer** keeps a package out of installation until a matching clean scan arrives or you change the policy that deferred it. **Block** disables approval while that category applies. You can also defer an individual update during inspection or cancel that deferral later. A confirmed block for the pending release can be cleared by a matching clean report from the source that raised it. A different release is assessed on its own results. When screening is off and there are remembered blocks, the manager pins any selected AUR updates to the displayed versions.
 
 Install pending official updates first. You can install one eligible package from its report, either eligible group on its own, or both groups together. The manager checks the reports and local decisions again, clones each selected recipe into a temporary directory, and verifies its name and version there. Yay or Paru builds those same directories with `-Bi`. The checkout stays at the verified commit during the run. A recipe that computes its version with `pkgver()` can still produce a different version from a moving source.
 
@@ -199,7 +201,7 @@ A package counts when its `command` in `scripts/features/features.yaml` works. O
 | `aur-review` | `true`, `false` | `true` |
 | `aur-screening` | `true`, `false` | `false` |
 | `aur-screening-sources` | Map of source IDs to `true` or `false`: `wtako`, `aurwatch`, `pkglint`, `aur-review`, `aur-sleuth`, `cretezy` | All sources enabled when screening is on |
-| `aur-screening-policies` | Map of `minor`, `suspicious`, and `missing` to `inspect`, `defer`, or `block` | `minor: inspect`, `suspicious: block`, `missing: inspect` |
+| `aur-screening-policies` | Map of `minor`, `suspicious`, and `missing` to `inspect`, `defer`, or `block` | `minor: inspect`, `suspicious: block`, `missing: defer` |
 | `output` | `compact`, `verbose` | `compact` |
 | `app-menu` | `true`, `false` | `true` |
 | `notify` | `hourly`, `daily`, `weekly`, `off` | `hourly` |
@@ -334,7 +336,8 @@ Every text is English and translated in `locales/de.po`.
 |---|---|
 | `LC_ALL` | `C.UTF-8`, one known wording |
 | `SM_AUR` | AUR helper, empty for none |
-| `SM_AUR_BLOCKED` | Remembered compromised package names, one per line, excluded from screened transactions |
+| `SM_AUR_BLOCK_GENERATION` | Saved block revision rechecked before a guarded transaction |
+| `SM_AUR_BLOCKED` | Remembered compromised releases as `name=version`, one per line |
 | `SM_AUR_SCREENING` | `on` requires an explicit selection for AUR updates |
 | `SM_AUR_REVIEW` | `off` builds without the helper's review, else with it |
 | `SM_FLATPAK` | `on` where Flatpak is installed and enabled, else `off` |

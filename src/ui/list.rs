@@ -421,6 +421,17 @@ impl<I: Clone + Ord> List<I> {
 
     /// Returns the rows it drew on.
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer, ctx: &Ctx) -> u16 {
+        self.draw_focused(area, buf, ctx, true)
+    }
+
+    /// A page can give keyboard focus to a link while leaving the action list in place.
+    pub(super) fn draw_focused(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        ctx: &Ctx,
+        focused: bool,
+    ) -> u16 {
         let s = &ctx.style;
         let mut y = area.y;
         if let Some(filter) = &self.filter {
@@ -516,7 +527,7 @@ impl<I: Clone + Ord> List<I> {
                 );
                 continue;
             }
-            let current = i == self.cursor;
+            let current = focused && i == self.cursor;
             if current && area.x >= 2 {
                 put(
                     buf,

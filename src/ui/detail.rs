@@ -1,20 +1,23 @@
 //! A page of facts with its actions underneath. The facts scroll, the actions stay.
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::Style as Cell;
+use ratatui::layout::{Position, Rect};
+use ratatui::style::{Modifier, Style as Cell};
 
 use super::draw::{cut, put, scrollbar, waiting, width, wrap};
 use super::icon;
 use super::list::{Lead, List, Picked, Row, draw_row};
 use super::{Ctx, Does, Flow, Key, Loaded, Nav, Style, Tone};
 use crate::i18n::t;
-use crate::script::Failure;
+use crate::script::{Failure, op, query};
+use crate::ui::fetch::Task;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
     Field(String, String, Tone),
     Text(String, Tone),
+    /// A scan report opened by clicking the URL or focusing it with Tab and pressing Enter.
+    Link(String),
     Heading(String),
     /// Lines kept as they are, each in its tone.
     Code(Vec<(String, Tone)>),
@@ -96,10 +99,25 @@ pub struct Detail {
     page: usize,
     /// The facts are longer than their room, as last drawn.
     overflow: bool,
+    /// Only portions of links visible in the last draw can be clicked.
+    links: Vec<(Rect, String)>,
+    focused_link: Option<String>,
+    reveal_link: bool,
+    opening: Option<Task<Result<String, Failure>>>,
+    open_error: Option<String>,
 }
 
 impl Detail {
     pub fn set(&mut self, body: Vec<Block>, acts: Vec<Act>) {
+        self.links.clear();
+        if self.focused_link.as_ref().is_some_and(|url| {
+            !body
+                .iter()
+                .any(|b| matches!(b, Block::Link(link) if link == url))
+        }) {
+            self.focused_link = None;
+            self.reveal_link = false;
+        }
         self.body = body;
         let rows = acts
             .iter()
@@ -135,7 +153,64 @@ impl Detail {
         self.list.focus(&index);
     }
 
+    /// Tab walks the report links in reading order, then returns focus to the actions.
+    fn cycle_link(&mut self, reverse: bool) -> bool {
+        let mut links = Vec::new();
+        for block in &self.body {
+            if let Block::Link(link) = block
+                && !links.contains(&link)
+            {
+                links.push(link);
+            }
+        }
+        if links.is_empty() {
+            return false;
+        }
+        let current = links
+            .iter()
+            .position(|link| self.focused_link.as_ref() == Some(*link));
+        let next = match (current, reverse) {
+            (Some(i), true) => i.checked_sub(1),
+            (Some(i), false) => Some(i + 1),
+            (None, true) => Some(links.len() - 1),
+            (None, false) => Some(0),
+        };
+        self.focused_link = next.and_then(|n| links.get(n)).map(|url| (*url).clone());
+        self.reveal_link = self.focused_link.is_some();
+        true
+    }
+
+    fn open_link(&mut self, url: String, ctx: &Ctx) -> Flow {
+        if self.opening.is_none() {
+            self.open_error = None;
+            self.opening = Some(Task::start(ctx, move || {
+                query(op::DESKTOP_OPEN_REPORT, &[&url])
+            }));
+        }
+        Flow::Stay
+    }
+
+    pub fn click(&mut self, x: u16, y: u16, ctx: &Ctx) -> Flow {
+        let at = Position::new(x, y);
+        if let Some((_, url)) = self.links.iter().find(|(rect, _)| rect.contains(at)) {
+            let url = url.clone();
+            self.focused_link = Some(url.clone());
+            return self.open_link(url, ctx);
+        }
+        Flow::Ignored
+    }
+
     pub fn key(&mut self, key: Key, ctx: &mut Ctx) -> Flow {
+        if matches!(key, Key::Tab | Key::BackTab) && self.cycle_link(key == Key::BackTab) {
+            return Flow::Stay;
+        }
+        if key == Key::Enter
+            && let Some(url) = self.focused_link.clone()
+        {
+            return self.open_link(url, ctx);
+        }
+        self.focused_link = None;
+        self.reveal_link = false;
         let scroll_only = self.acts.is_empty();
         match key.nav(false) {
             Some(Nav::PageUp) => self.scroll = self.scroll.saturating_sub(self.page.max(1)),
@@ -191,9 +266,22 @@ impl Detail {
         } else {
             h.push(("↑↓", Does::Choose));
             let at = self.list.selected().and_then(|r| r.id).unwrap_or(0);
-            h.push(("⏎", self.acts[at].does));
+            h.push((
+                "⏎",
+                if self.focused_link.is_some() {
+                    Does::Open
+                } else {
+                    self.acts[at].does
+                },
+            ));
             if self.overflow {
                 h.push(("⇞⇟", Does::Scroll));
+            }
+        }
+        if self.body.iter().any(|b| matches!(b, Block::Link(_))) {
+            h.push(("tab", Does::SelectLink));
+            if self.focused_link.is_some() && self.acts.is_empty() {
+                h.push(("⏎", Does::Open));
             }
         }
         h.push(("esc", Does::Back));
@@ -202,7 +290,15 @@ impl Detail {
 
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer, ctx: &Ctx) {
         let s = &ctx.style;
-        let body_height = area.height.saturating_sub(self.acts_height()) as usize;
+        if let Some(result) = self.opening.as_mut().and_then(Task::take) {
+            self.opening = None;
+            self.open_error = result.err().map(|f| f.headline());
+        }
+        let error_height = u16::from(self.open_error.is_some());
+        let body_height = area
+            .height
+            .saturating_sub(self.acts_height())
+            .saturating_sub(error_height) as usize;
         let pinned = self.pinned.min(self.body.len());
         // One column for the labels of the head and the rest.
         let labels = label_width(&self.body, area.width as usize);
@@ -210,6 +306,13 @@ impl Detail {
         let lines = render_part(&self.body[pinned..], area.width as usize, ctx, labels);
         let head_height = head.len().min(body_height);
         let rest_height = body_height - head_height;
+        if self.reveal_link {
+            self.reveal_link = false;
+            if let Some(n) = lines.iter().position(|line| matches!(line, Line::Link(_, url) if Some(url) == self.focused_link.as_ref()))
+                && !(self.scroll..self.scroll + rest_height).contains(&n) {
+                self.scroll = n;
+            }
+        }
         self.page = rest_height.saturating_sub(1);
         self.scroll = self.scroll.min(lines.len().saturating_sub(rest_height));
         self.overflow = lines.len() > rest_height;
@@ -221,9 +324,19 @@ impl Detail {
             .iter()
             .take(head_height)
             .chain(lines.iter().skip(self.scroll).take(rest_height));
+        self.links.clear();
         for (n, line) in shown.enumerate() {
             let y = area.y + n as u16;
             match line {
+                Line::Link(text, url) => {
+                    let mut style = s.tone(Tone::Accent).add_modifier(Modifier::UNDERLINED);
+                    if self.focused_link.as_ref() == Some(url) {
+                        style = style.bg(s.selection).add_modifier(Modifier::BOLD);
+                    }
+                    let end = put(buf, area.x, y, text, area.width, style);
+                    self.links
+                        .push((Rect::new(area.x, y, end - area.x, 1), url.clone()));
+                }
                 Line::Spans(spans) => {
                     let mut x = area.x;
                     for (text, tone, bold) in spans {
@@ -257,12 +370,25 @@ impl Detail {
             rest_height as u16,
         );
         scrollbar(buf, rest, lines.len(), self.scroll, ctx);
+        if let Some(error) = &self.open_error
+            && area.height > self.acts_height()
+        {
+            put(
+                buf,
+                area.x,
+                area.y + body_height as u16,
+                error,
+                area.width,
+                s.tone(Tone::Error),
+            );
+        }
         if !self.acts.is_empty() {
             let rows = (self.acts.len() as u16).min(area.height);
-            self.list.draw(
+            self.list.draw_focused(
                 Rect::new(area.x, area.y + area.height - rows, area.width, rows),
                 buf,
                 ctx,
+                self.focused_link.is_none(),
             );
         }
     }
@@ -272,6 +398,7 @@ pub type Span = (String, Tone, bool);
 
 enum Line {
     Spans(Vec<Span>),
+    Link(String, String),
     Row(Lead, Vec<(String, Tone)>, Vec<(String, Tone)>),
 }
 
@@ -317,6 +444,11 @@ fn render_part(body: &[Block], w: usize, ctx: &Ctx, label_width: usize) -> Vec<L
                 wrap(text, w)
                     .into_iter()
                     .map(|l| Line::Spans(vec![(l, *tone, false)])),
+            ),
+            Block::Link(url) => out.extend(
+                wrap(url, w)
+                    .into_iter()
+                    .map(|line| Line::Link(line, url.clone())),
             ),
             Block::Heading(text) => out.extend(
                 wrap(text, w)
@@ -452,6 +584,75 @@ mod tests {
     }
 
     #[test]
+    fn pointer_and_keyboard_activate_the_rendered_link_and_scroll_to_offscreen_links() {
+        let (mut app, _) = crate::ui::app::tests::app();
+        let mut d = Detail::default();
+        let first = "https://invalid.example/long/wrapped/report";
+        let second = "https://invalid.example/other";
+        let mut body = vec![Block::Link(first.into())];
+        body.extend((0..8).map(|_| Block::Blank));
+        body.push(Block::Link(second.into()));
+        d.set(body, vec![Act::new("Other", |_| Flow::Quit)]);
+        let area = Rect::new(3, 2, 16, 6);
+        drawn(&mut d, area, &app.ctx);
+        assert!(matches!(d.key(Key::Enter, &mut app.ctx), Flow::Quit));
+        assert!(d.links.len() > 1, "the first URL wraps");
+        let rect = d.links[1].0;
+        assert!(matches!(
+            d.click(rect.right(), rect.y, &app.ctx),
+            Flow::Ignored
+        ));
+        assert!(matches!(d.click(rect.x, rect.y, &app.ctx), Flow::Stay));
+        assert_eq!(d.focused_link.as_deref(), Some(first));
+        assert!(d.opening.is_some());
+        d.key(Key::Tab, &mut app.ctx);
+        drawn(&mut d, area, &app.ctx);
+        assert_eq!(d.focused_link.as_deref(), Some(second));
+        assert!(d.links.iter().all(|(_, link)| link == second));
+        assert!(d.links.iter().any(|(_, link)| link == second));
+        // These test hosts are refused by the browser launcher before desktop dispatch.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while d.opening.is_some() && std::time::Instant::now() < until {
+            drawn(&mut d, area, &app.ctx);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(d.open_error.is_some());
+        assert!(matches!(d.key(Key::Enter, &mut app.ctx), Flow::Stay));
+        assert!(d.opening.is_some());
+        d.key(Key::Tab, &mut app.ctx);
+        assert!(matches!(d.key(Key::Enter, &mut app.ctx), Flow::Quit));
+
+        // A report replaced during refresh must lose its focus and old click targets.
+        d.key(Key::BackTab, &mut app.ctx);
+        d.set(vec![Block::Blank], vec![]);
+        assert!(d.focused_link.is_none() && d.links.is_empty());
+    }
+
+    #[test]
+    fn repeated_report_urls_get_one_keyboard_stop_each() {
+        let mut d = Detail::default();
+        d.set(
+            ["a", "a", "b", "a", "c"]
+                .map(|url| Block::Link(url.into()))
+                .into(),
+            vec![],
+        );
+        for (reverse, expected) in [
+            (false, Some("a")),
+            (false, Some("b")),
+            (false, Some("c")),
+            (false, None),
+            (true, Some("c")),
+            (true, Some("b")),
+            (true, Some("a")),
+            (true, None),
+        ] {
+            assert!(d.cycle_link(reverse));
+            assert_eq!(d.focused_link.as_deref(), expected);
+        }
+    }
+
+    #[test]
     fn tabs_stand_as_spaces_to_the_next_stop() {
         assert_eq!(untab("\tpackage() {", &mut 0), "        package() {");
         let mut column = 0;
@@ -565,7 +766,7 @@ mod tests {
             .iter()
             .filter_map(|l| match l {
                 Line::Spans(spans) => Some(spans.iter().map(|(t, ..)| t.as_str()).collect()),
-                Line::Row(..) => None,
+                Line::Row(..) | Line::Link(..) => None,
             })
             .collect();
         assert_eq!(texts, ["A manual step", "before the", "update"]);
@@ -587,7 +788,7 @@ mod tests {
             .iter()
             .filter_map(|l| match l {
                 Line::Row(lead, label, _) => Some((*lead, label[0].0.as_str())),
-                Line::Spans(_) => None,
+                Line::Spans(_) | Line::Link(..) => None,
             })
             .collect();
         assert_eq!(leads, [(Lead::Bullet, "one two"), (Lead::None, "three")]);

@@ -203,6 +203,19 @@ op_open() {
     systemd-run --user --collect --quiet -- "$@"
 }
 
+# Only the HTTPS report services have links in the manager's scan details.
+op_open_report() {
+    local url=${1-} host
+    [[ $# == 1 && $url == https://*/* && $url != *[[:space:][:cntrl:]]* && $url != *\\* ]] || exit 14
+    host=${url#https://}
+    case ${host%%/*} in
+    aurwatch.org | aur-audit.wtako.net | jamison.lahman.dev | aur-review.com | mgalgs.io | aur-security.cretezy.com)
+        gio open "$url" >/dev/null 2>&1 3>&- || exit 14
+        ;;
+    *) exit 14 ;;
+    esac
+}
+
 # The update indicator from extensions.gnome.org, through the running GNOME
 # Shell, which asks the person, takes the version for itself and loads it at
 # once. The call returns with the answer, or with an error. The shell itself

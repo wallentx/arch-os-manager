@@ -916,17 +916,88 @@ fn a_remembered_compromise_cannot_become_an_explicit_screened_target() {
     let o = s.run(
         "upgrade",
         &["run", "screened", "blocked", "2-1", "blocked"],
-        &[("SM_AUR", "paru"), ("SM_AUR_BLOCKED", "other\nblocked")],
+        &[
+            ("SM_AUR", "paru"),
+            ("SM_AUR_BLOCKED", "other=1-1\nblocked=2-1"),
+        ],
     );
     assert_eq!(o.code, 14);
     assert!(o.calls.is_empty());
-    let bulk = s.run(
-        "upgrade",
-        &["run"],
-        &[("SM_AUR", "paru"), ("SM_AUR_BLOCKED", "blocked")],
+    s.stub(
+        "paru",
+        r#"if [[ $1 == -Qua ]]; then printf '%s\n' 'blocked 1-1 -> 2-1'; fi"#,
     );
-    assert_eq!(bulk.code, 16);
-    assert!(bulk.calls.is_empty());
+    s.stub("pacman", "exit 0");
+    let bulk = |known| {
+        s.run(
+            "upgrade",
+            &["run"],
+            &[("SM_AUR", "paru"), ("SM_AUR_BLOCKED", known)],
+        )
+    };
+    let matching = bulk("blocked=2-1");
+    assert_eq!(matching.code, 16);
+    assert!(!matching.calls.contains("pacman -Syu"));
+    // A raw bulk run cannot check dependency releases. The guarded plan below
+    // handles a newer candidate without allowing the helper to select targets.
+    let older = bulk("blocked=1-1");
+    assert_eq!(older.code, 16);
+    assert!(!older.calls.contains("paru -Sua"));
+}
+
+#[test]
+fn guarded_updates_check_missing_dependencies_even_with_no_other_pending_targets() {
+    let s = Sandbox::new("guarded-dependency");
+    local_aur(&s);
+    recipe(
+        &s,
+        "good",
+        "pkgbase = good\npkgver = 2\npkgrel = 1\ndepends = blocked>=2\npkgname = good\n",
+    );
+    s.stub(
+        "paru",
+        r#"if [[ $1 == -Qua ]]; then printf '%s\n' 'good 1-1 -> 2-1'; fi"#,
+    );
+    s.stub("checkupdates", "exit 2");
+    s.stub("flatpak", "exit 0");
+    s.stub(
+        "pacman",
+        r#"if [[ $1 == -T ]]; then printf '%s\n' 'blocked>=2'; exit 127; fi"#,
+    );
+    let run = |mode, generation, policy, saved| {
+        let _ = std::fs::remove_file(s.dir.join("calls"));
+        s.run(
+            "upgrade",
+            &[
+                "run", mode, "--blocks", generation, policy, "good", "2-1", "good",
+            ],
+            &[
+                ("SM_AUR", "paru"),
+                ("SM_AUR_BLOCKED", saved),
+                ("SM_AUR_BLOCK_GENERATION", "7"),
+                ("SM_AUR_REVIEW", "off"),
+                ("SM_FLATPAK", "on"),
+            ],
+        )
+    };
+    let stale = run("guarded", "6", "clear", "blocked=2-1");
+    assert_eq!(stale.code, 14);
+    assert!(stale.calls.is_empty());
+    for mode in ["screened", "guarded"] {
+        let blocked = run(mode, "7", "strict", "blocked=2-1");
+        assert_eq!(blocked.code, 18, "{}{}", blocked.events, blocked.err);
+        assert!(blocked.calls.contains("pacman -T -- blocked>=2"));
+        assert!(!blocked.calls.contains(" -Bi ") && !blocked.calls.contains(" -Sua"));
+        if mode == "guarded" {
+            assert!(
+                blocked.calls.contains("pacman -Syu") && blocked.calls.contains("flatpak update")
+            );
+        }
+    }
+    let past = run("guarded", "7", "clear", "blocked=1-1");
+    assert_eq!(past.code, 0, "{}{}", past.events, past.err);
+    assert!(past.calls.contains(" -Bi "));
+    assert!(!past.calls.contains("pacman -T") && !past.calls.contains(" -Sua"));
 }
 
 #[test]
@@ -1007,6 +1078,35 @@ fn screened_updates_check_build_metadata_and_dependencies_before_running_the_hel
     }
     s.stub("git", "exit 1");
     assert_eq!(run().code, 19);
+}
+
+#[test]
+fn scan_report_links_open_an_allowed_https_url_as_one_desktop_argument() {
+    let s = Sandbox::new("scan-report-link");
+    s.stub(
+        "gio",
+        r#"[[ $# == 2 && $1 == open ]] || exit 7; printf '%s' "$2" > "$HOME/opened""#,
+    );
+    let valid = "https://aur-audit.wtako.net/package-analysis?names=lib%2B%2B&version=1";
+    assert_eq!(s.run("desktop", &["open-report", valid], &[]).code, 0);
+    assert_eq!(
+        std::fs::read_to_string(s.dir.join("opened")).unwrap(),
+        valid
+    );
+    for url in [
+        "file:///etc/passwd",
+        "http://aurwatch.org/page",
+        "https://aurwatch.org.evil.example/page",
+        "https://aurwatch.org@evil.example/page",
+        "https://evil.example\\@aurwatch.org/page",
+        "https://aurwatch.org/path\nother",
+    ] {
+        let o = s.run("desktop", &["open-report", url], &[]);
+        assert_eq!(o.code, 14, "{url:?}");
+        assert!(!o.calls.contains(url));
+    }
+    s.stub("gio", "exit 1");
+    assert_eq!(s.run("desktop", &["open-report", valid], &[]).code, 14);
 }
 
 #[test]
