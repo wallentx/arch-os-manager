@@ -248,14 +248,24 @@ enum Decision {
 }
 
 impl Decision {
-    fn available(self, name: &str, report: &Report, ctx: &Ctx, state: &State) -> bool {
+    fn available(
+        self,
+        name: &str,
+        report: &Report,
+        settings: &crate::settings::Settings,
+        state: &State,
+    ) -> bool {
         match self {
             Self::Approve => {
-                inspectable(name, report, &ctx.settings, state)
+                report.complete()
+                    && inspectable(name, report, settings, state)
                     && state.aur_trust.get(name) != Some(report)
             }
-            Self::Defer => inspectable(name, report, &ctx.settings, state),
-            Self::Revoke => state.aur_trust.get(name) == Some(report),
+            Self::Defer => inspectable(name, report, settings, state),
+            Self::Revoke => state
+                .aur_trust
+                .get(name)
+                .is_some_and(|approved| approved.retains_approval(report)),
             Self::CancelDeferral => {
                 report.category != Category::Malicious
                     && !state.is_malicious(name, &report.version)
@@ -285,8 +295,8 @@ impl Decision {
             {
                 return Flow::Stay;
             }
-            match State::try_update(|state| {
-                if !self.available(&name, &report, ctx, state) {
+            match ctx.state.change_aur(|state| {
+                if !self.available(&name, &report, &ctx.settings, state) {
                     return;
                 }
                 match self {
@@ -305,13 +315,7 @@ impl Decision {
                     }
                 }
             }) {
-                Ok(state) => {
-                    ctx.state.aur_trust = state.aur_trust;
-                    ctx.state.aur_holds = state.aur_holds;
-                    ctx.state.aur_malicious = state.aur_malicious;
-                    ctx.state.aur_deferrals = state.aur_deferrals;
-                    Flow::Pop
-                }
+                Ok(()) => Flow::Pop,
                 Err(error) => {
                     let mut page = PackageReport::new(name.clone());
                     page.save_error = Some(error.to_string());
@@ -359,8 +363,15 @@ fn sources(body: &mut Vec<Block>, ctx: &Ctx, report: Option<&Report>, u: &Update
         body.extend(
             e.findings
                 .iter()
+                .chain(e.details.iter().flatten())
                 .map(|f| Block::Note(Lead::Bullet, f.clone(), Tone::Normal)),
         );
+        if e.details.is_none() {
+            body.push(Block::Text(
+                t("Detailed findings unavailable. Check again before approving.").into(),
+                Tone::Warn,
+            ));
+        }
         if !e.url.is_empty() {
             body.push(Block::Link(e.url.clone()));
         }
@@ -450,7 +461,7 @@ impl Page for PackageReport {
                 Decision::Defer,
             ] {
                 if c != Category::Malicious
-                    && decision.available(&self.name, report, ctx, &ctx.state)
+                    && decision.available(&self.name, report, &ctx.settings, &ctx.state)
                 {
                     acts.push(decision.action(&self.name, report));
                 }
@@ -497,6 +508,7 @@ mod tests {
                     category,
                     summary: "WTAKO fixture".into(),
                     findings: vec!["Check the recipe".into()],
+                    details: Some(Vec::new()),
                     url: "https://example.org/first".into(),
                 },
                 Evidence {
@@ -505,6 +517,7 @@ mod tests {
                     category: Category::Missing,
                     summary: "No analysis available".into(),
                     findings: vec![],
+                    details: Some(Vec::new()),
                     url: "https://example.org/second".into(),
                 },
             ],
@@ -618,6 +631,7 @@ mod tests {
             category: Category::Suspicious,
             summary: "Historical fixture".into(),
             findings: vec!["Old warning".into()],
+            details: Some(Vec::new()),
             url: "https://example.org/old".into(),
         };
         let r = Report::new("2-1", vec![current, previous]);
@@ -710,6 +724,7 @@ mod tests {
             category: Category::Minor,
             summary: "Unversioned fixture".into(),
             findings: vec!["Old warning".into()],
+            details: Some(Vec::new()),
             url: "https://example.org/other".into(),
         };
         let mut current = Report::new("2-1", vec![old.clone(), unversioned.clone()]);

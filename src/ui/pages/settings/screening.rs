@@ -5,10 +5,10 @@ use ratatui::{buffer::Buffer, layout::Rect};
 use super::on_off;
 use crate::data::screening::{Category, Policy, Scanner};
 use crate::i18n::{t, tf};
+use crate::script;
 use crate::ui::list::{List, Picked, Row};
 use crate::ui::target::Target;
 use crate::ui::{Ctx, Does, Flow, Key, Nav, Page, Tone};
-use crate::{script, state::State};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Setting {
@@ -188,13 +188,11 @@ impl Page for PolicyPage {
                     if ctx.settings.aur_screening
                         && let Some(pending) = ctx.shared.updates.ready()
                     {
-                        match State::try_update(|s| {
-                            s.apply_policies(&pending.screens, &ctx.settings)
-                        }) {
-                            Ok(state) => {
-                                ctx.state.aur_deferrals = state.aur_deferrals;
-                                ctx.state.aur_trust = state.aur_trust;
-                            }
+                        match ctx
+                            .state
+                            .change_aur(|s| s.apply_policies(&pending.screens, &ctx.settings))
+                        {
+                            Ok(()) => {}
                             Err(e) => {
                                 ctx.settings.set_screening_policy(self.category, previous);
                                 self.error = Some(e.to_string());

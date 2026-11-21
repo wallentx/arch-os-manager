@@ -118,6 +118,9 @@ pub struct Evidence {
     pub category: Category,
     pub summary: String,
     pub findings: Vec<String>,
+    /// None means additional provider findings could not be fetched.
+    #[serde(default = "base_findings")]
+    pub details: Option<Vec<String>>,
     pub url: String,
 }
 
@@ -133,6 +136,10 @@ pub struct Report {
     pub evidence: Vec<Evidence>,
 }
 
+fn base_findings() -> Option<Vec<String>> {
+    Some(Vec::new())
+}
+
 impl Evidence {
     pub fn matches_candidate(&self, version: &str) -> bool {
         !version.is_empty()
@@ -142,6 +149,34 @@ impl Evidence {
 }
 
 impl Report {
+    pub fn complete(&self) -> bool {
+        self.evidence.iter().all(|e| e.details.is_some())
+    }
+
+    /// Keep an approval dormant when a source returns only the same assessment's
+    /// summary. Installing still requires the complete findings to match.
+    pub(crate) fn retains_approval(&self, observed: &Self) -> bool {
+        self.version == observed.version
+            && self.category == observed.category
+            && self.sources == observed.sources
+            && self.evidence.len() == observed.evidence.len()
+            && self
+                .evidence
+                .iter()
+                .zip(&observed.evidence)
+                .all(|(approved, current)| {
+                    approved == current
+                        || (current.details.is_none()
+                            && approved.details.is_some()
+                            && approved.scanner == current.scanner
+                            && approved.version == current.version
+                            && approved.category == current.category
+                            && approved.summary == current.summary
+                            && approved.findings == current.findings
+                            && approved.url == current.url)
+                })
+    }
+
     pub fn new(version: &str, mut evidence: Vec<Evidence>) -> Self {
         let sources = evidence.iter().map(|item| item.scanner).collect();
         evidence.retain(|item| item.matches_candidate(version));
@@ -206,7 +241,7 @@ pub fn eligible(name: &str, report: &Report, settings: &Settings, state: &State)
     }
     match settings.screening_policy(report.category) {
         Policy::Allow => report.category == Category::Clean,
-        Policy::Inspect => state.aur_trust.get(name) == Some(report),
+        Policy::Inspect => report.complete() && state.aur_trust.get(name) == Some(report),
         Policy::Defer | Policy::Block => false,
     }
 }
@@ -291,6 +326,7 @@ fn assess(
                         category: Category::Missing,
                         summary: "No report available".into(),
                         findings: Vec::new(),
+                        details: Some(Vec::new()),
                         url: String::new(),
                     });
                     if key != name {
@@ -426,7 +462,10 @@ pub fn verify(expected: &BTreeMap<String, Report>) -> Result<Vec<String>, crate:
             s.apply_policies(&fresh, safety_settings);
         }
         s.aur_trust.retain(|name, approved| {
-            expected.get(name) != Some(approved) || fresh.get(name) == Some(approved)
+            expected.get(name) != Some(approved)
+                || fresh
+                    .get(name)
+                    .is_some_and(|r| approved.retains_approval(r))
         });
     })
     .map_err(|_| rejected())?;
@@ -437,9 +476,15 @@ pub fn verify(expected: &BTreeMap<String, Report>) -> Result<Vec<String>, crate:
     }) {
         return Err(rejected());
     }
-    let state = State::try_load().map_err(|_| rejected())?;
-    let args = arguments(expected, &fresh, &settings()?, &state, &packages)?;
-    guard::finalize(args, &state, &packages)
+    // Resolving other remembered releases can involve network I/O. Read all
+    // mutable authorization inputs after that lookup, immediately before binding the plan.
+    let releases = guard::resolve(&state, &packages);
+    let current = State::try_load().map_err(|_| rejected())?;
+    if current.aur_block_generation != state.aur_block_generation {
+        return Err(rejected());
+    }
+    let args = arguments(expected, &fresh, &settings()?, &current, &packages)?;
+    guard::bound_plan(args, &current, &releases)
 }
 
 #[cfg(test)]
@@ -453,6 +498,7 @@ mod tests {
             version: version.map(str::to_string),
             summary: scanner.label().into(),
             findings: vec![],
+            details: Some(Vec::new()),
             url: String::new(),
         }
     }
@@ -525,6 +571,32 @@ mod tests {
         assert!(!inspectable("pkg", &bad, &s, &state));
         let selected = BTreeMap::from([("pkg".into(), bad)]);
         assert!(arguments(&selected, &selected, &s, &state, &pkgs).is_err());
+    }
+
+    #[test]
+    fn missing_detail_preserves_but_cannot_use_prior_approval() {
+        let settings = settings(&[Scanner::Cretezy]);
+        let mut evidence = observed(Scanner::Cretezy, Category::Minor, Some("1-1"));
+        evidence.findings = vec!["Recipe commit abc".into()];
+        evidence.details = Some(vec!["Original assessment".into()]);
+        evidence.url = "https://aur-security.cretezy.com/checks/pkg/abc".into();
+        let approved = Report::new("1-1", vec![evidence.clone()]);
+        let mut state = State::default();
+        state.aur_trust.insert("pkg".into(), approved.clone());
+        assert!(eligible("pkg", &approved, &settings, &state));
+        evidence.details = None;
+        let partial = Report::new("1-1", vec![evidence.clone()]);
+        assert!(approved.retains_approval(&partial));
+        assert!(!eligible("pkg", &partial, &settings, &state));
+        assert!(!partial.complete());
+        let mut changed = partial.clone();
+        changed.evidence[0].url.push('d');
+        assert!(!approved.retains_approval(&changed));
+        evidence.details = Some(vec!["Different assessment".into()]);
+        let changed = Report::new("1-1", vec![evidence]);
+        assert!(
+            !approved.retains_approval(&changed) && !eligible("pkg", &changed, &settings, &state)
+        );
     }
 
     #[test]

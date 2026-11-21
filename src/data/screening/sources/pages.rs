@@ -60,6 +60,7 @@ pub(super) fn lint(doc: &str, name: &str, candidate: &str) -> Option<Evidence> {
         return None;
     }
     Some(Evidence {
+        details: Some(Vec::new()),
         scanner: Scanner::Pkglint,
         version: Some(candidate.to_owned()),
         category,
@@ -95,32 +96,17 @@ fn risks(row: ElementRef<'_>) -> Option<(Category, Vec<String>)> {
     (!labels.is_empty()).then_some((worst, labels))
 }
 
-fn ai_summary(doc: &str, name: &str, candidate: &str) -> Option<(String, Option<Evidence>)> {
+/// The search page resolves a package ID. Its overview badges can span versions;
+/// only a Reviewed row in the version history identifies the candidate's scores.
+fn ai_package(doc: &str, name: &str) -> Option<String> {
     let root = Html::parse_document(doc);
-    for row in root.select(&select("tbody tr")) {
-        let Some(link) = row.select(&select("a[href^='/packages/']")).next() else {
-            continue;
-        };
-        if text(link)?.as_str() != name {
-            continue;
-        }
-        let id = numeric_path(link.value().attr("href")?, "/packages/", "/versions")?;
-        let current = (row.select(&select("td")).nth(2).and_then(text).as_deref()
-            == Some(candidate))
-        .then(|| risks(row))
-        .flatten()
-        .map(|(category, findings)| Evidence {
-            scanner: Scanner::AurReview,
-            version: Some(candidate.into()),
-            category,
-            summary: format!("{} hunk assessments", findings.len()),
-            findings,
-            url: format!("https://aur-review.com/packages/{id}/versions"),
-        });
-        // A version in the history can match even if the search summary is unavailable or stale.
-        return Some((id.into(), current));
-    }
-    None
+    root.select(&select("tbody a[href^='/packages/']"))
+        .find_map(|link| {
+            if text(link).as_deref() != Some(name) {
+                return None;
+            }
+            numeric_path(link.value().attr("href")?, "/packages/", "/versions").map(str::to_owned)
+        })
 }
 
 fn ai_version(doc: &str, name: &str, candidate: &str) -> Option<(Evidence, String)> {
@@ -142,6 +128,7 @@ fn ai_version(doc: &str, name: &str, candidate: &str) -> Option<(Evidence, Strin
         let (category, findings) = risks(row)?;
         return Some((
             Evidence {
+                details: (category == Category::Clean).then(Vec::new),
                 scanner: Scanner::AurReview,
                 version: Some(candidate.into()),
                 category,
@@ -179,35 +166,38 @@ fn ai_comments(doc: &str, name: &str, id: &str, scores: &[String]) -> Option<Vec
 }
 
 fn summarize_scores(mut evidence: Evidence) -> Evidence {
-    if evidence.findings.iter().all(|s| risk(s).is_some()) {
-        let mut counts = BTreeMap::new();
-        for score in &evidence.findings {
-            *counts.entry(score.as_str()).or_insert(0) += 1;
-        }
-        evidence.findings = counts
-            .into_iter()
-            .map(|(score, count)| format!("{score} × {count}"))
-            .collect();
+    let mut counts = BTreeMap::new();
+    for score in &evidence.findings {
+        *counts.entry(score.as_str()).or_insert(0) += 1;
     }
+    evidence.findings = counts
+        .into_iter()
+        .map(|(score, count)| format!("{score} × {count}"))
+        .collect();
     evidence
 }
 
 pub(super) fn ai(doc: &str, name: &str, candidate: &str, deadline: Instant) -> Option<Evidence> {
-    let (pkgid, summary) = ai_summary(doc, name, candidate)?;
-    if Instant::now() >= deadline {
-        return summary.map(summarize_scores);
-    }
-    let Some((mut e, version_id)) = fetch(&["aur-review", name, &format!("packages/{pkgid}")])
-        .and_then(|page| ai_version(&page, name, candidate))
-    else {
-        return summary.map(summarize_scores);
-    };
-    if e.category != Category::Clean
-        && Instant::now() < deadline
-        && let Some(comments) = fetch(&["aur-review", name, &format!("versions/{version_id}")])
-            .and_then(|page| ai_comments(&page, name, &version_id, &e.findings))
-    {
-        e.findings = comments;
+    ai_with(doc, name, candidate, |path| {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        fetch(&["aur-review", name, path])
+    })
+}
+
+fn ai_with(
+    doc: &str,
+    name: &str,
+    candidate: &str,
+    mut page: impl FnMut(&str) -> Option<String>,
+) -> Option<Evidence> {
+    let pkgid = ai_package(doc, name)?;
+    let history = page(&format!("packages/{pkgid}"))?;
+    let (mut e, version_id) = ai_version(&history, name, candidate)?;
+    if e.category != Category::Clean {
+        e.details = page(&format!("versions/{version_id}"))
+            .and_then(|doc| ai_comments(&doc, name, &version_id, &e.findings));
     }
     Some(summarize_scores(e))
 }
@@ -240,6 +230,7 @@ fn cretezy_summary(doc: &str, name: &str, candidate: &str) -> Option<(Evidence, 
         };
         return Some((
             Evidence {
+                details: (category == Category::Clean).then(Vec::new),
                 scanner: Scanner::Cretezy,
                 version: Some(version.into()),
                 category,
@@ -265,15 +256,10 @@ fn assessment(doc: &str, name: &str, commit: &str, e: &Evidence) -> Option<Vec<S
     {
         return None;
     }
-    let mut lines = vec![format!(
-        "{} · {}",
-        field(a, "provider")?,
-        field(a, "model")?
-    )];
-    if let Some(value) = a["explanation"].as_str() {
-        lines.push(plain(value)?);
-    }
-    Some(lines)
+    Some(vec![
+        format!("{} · {}", field(a, "provider")?, field(a, "model")?),
+        field(a, "explanation")?,
+    ])
 }
 
 pub(super) fn cretezy(
@@ -282,12 +268,23 @@ pub(super) fn cretezy(
     candidate: &str,
     deadline: Instant,
 ) -> Option<Evidence> {
+    cretezy_with(doc, name, candidate, |commit| {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        fetch(&["cretezy", name, commit])
+    })
+}
+
+fn cretezy_with(
+    doc: &str,
+    name: &str,
+    candidate: &str,
+    lookup: impl FnOnce(&str) -> Option<String>,
+) -> Option<Evidence> {
     let (mut e, commit) = cretezy_summary(doc, name, candidate)?;
-    if Instant::now() < deadline
-        && let Some(lines) =
-            fetch(&["cretezy", name, &commit]).and_then(|doc| assessment(&doc, name, &commit, &e))
-    {
-        e.findings.extend(lines);
+    if e.category != Category::Clean {
+        e.details = lookup(&commit).and_then(|doc| assessment(&doc, name, &commit, &e));
     }
     Some(e)
 }
@@ -313,26 +310,17 @@ mod tests {
         assert_eq!(drift.category, Category::Suspicious);
     }
     #[test]
-    fn ai_uses_the_exact_search_hit_and_scores_each_hunk() {
+    fn ai_discovers_the_exact_package_and_requires_its_version_record() {
         let doc = r#"<table><tbody><tr><td>1</td><td><a href='/packages/1/versions'>pkg</a></td><td>1-2</td><td><span title='Risk 1/5 · Low'></span><span title='Risk 4/5 · High'></span></td></tr></tbody></table>"#;
-        let (id, e) = ai_summary(doc, "pkg", "1-2").unwrap();
-        let e = e.unwrap();
-        assert_eq!((id.as_str(), e.category), ("1", Category::Suspicious));
-        assert!(ai_summary(doc, "p", "1-2").is_none());
+        assert_eq!(ai_package(doc, "pkg").as_deref(), Some("1"));
+        assert!(ai_package(doc, "p").is_none());
+        assert!(ai_with(doc, "pkg", "1-2", |_| None).is_none());
         assert_eq!(risk("Risk 5/5 · Malicious"), Some(Category::Suspicious));
-        assert!(
-            ai_summary(&doc.replace("Risk 4/5", "Unknown"), "pkg", "1-2")
-                .unwrap()
-                .1
-                .is_none()
-        );
     }
     #[test]
     fn ai_archive_selects_the_exact_review_even_without_a_usable_latest_summary() {
         let page = r#"<table><tbody><tr><td>1</td><td><a href='/packages/9/versions'>pkg</a></td><td></td></tr></tbody></table>"#;
-        let (id, summary) = ai_summary(page, "pkg", "1:2-1").unwrap();
-        assert_eq!(id, "9");
-        assert!(summary.is_none());
+        assert_eq!(ai_package(page, "pkg").as_deref(), Some("9"));
         let history = r#"<h1><span>pkg</span></h1><table><tbody>
         <tr><td><a href='/versions/4'>2-1</a></td><td/><td/><td>Reviewed</td><td><span title='Risk 4/5 · High'></span></td></tr>
         <tr><td><a href='/versions/3'>1:2-1</a></td><td></td><td></td><td>Reviewed</td><td><span title='Risk 0/5 · Safe'></span></td></tr>
@@ -341,6 +329,88 @@ mod tests {
         assert_eq!(id, "3");
         assert_eq!(e.category, Category::Clean);
         assert!(ai_version(history, "pkg", "1:2-2").is_none());
+        let exact = ai_with(page, "pkg", "1:2-1", |path| {
+            assert_eq!(path, "packages/9");
+            Some(history.into())
+        })
+        .unwrap();
+        assert_eq!(exact.details, Some(Vec::new()));
+        assert_eq!(exact.url, "https://aur-review.com/versions/3");
+    }
+
+    #[test]
+    fn ai_enrichment_preserves_scores_and_identifies_text_changes() {
+        let search = r#"<table><tbody><tr><td>1</td><td><a href='/packages/1/versions'>pkg</a></td><td>2-1</td><td><span title='Risk 1/5 · Low'></span></td></tr></tbody></table>"#;
+        let versions = r#"<h1><span>pkg</span></h1><table><tbody><tr><td><a href='/versions/15'>2-1</a></td><td></td><td></td><td>Reviewed</td><td><span title='Risk 1/5 · Low'></span></td></tr></tbody></table>"#;
+        let details = r#"<main><h1>Version</h1><p><span>#15</span><span>pkg</span></p></main><article><header><span>Risk 1/5 · Low</span><span>PKGBUILD</span></header><p class='whitespace-pre-wrap'>Unpinned source</p></article>"#;
+        assert!(ai_with(search, "pkg", "2-1", |_| None).is_none());
+        let history_only = ai_with(search, "pkg", "2-1", |path| {
+            (path == "packages/1").then(|| versions.into())
+        })
+        .unwrap();
+        let full = |details: &str| {
+            ai_with(search, "pkg", "2-1", |path| match path {
+                "packages/1" => Some(versions.into()),
+                "versions/15" => Some(details.into()),
+                _ => panic!("unexpected request {path}"),
+            })
+            .unwrap()
+        };
+        let inspected = full(details);
+        assert_eq!(history_only.category, Category::Minor);
+        assert_eq!(history_only.summary, inspected.summary);
+        assert_eq!(history_only.findings, inspected.findings);
+        assert!(history_only.details.is_none());
+        assert_eq!(history_only.url, inspected.url);
+        assert_eq!(
+            inspected.details.unwrap(),
+            ["PKGBUILD · Risk 1/5 · Low: Unpinned source"]
+        );
+        assert_ne!(
+            full(details),
+            full(&details.replace("Unpinned source", "Downloads during build"))
+        );
+        let changed = versions.replace("Risk 1/5 · Low", "Risk 2/5 · Medium");
+        assert_ne!(
+            ai_with(search, "pkg", "2-1", |p| (p == "packages/1")
+                .then(|| changed.clone()))
+            .unwrap()
+            .findings,
+            history_only.findings
+        );
+    }
+
+    #[test]
+    fn cretezy_enrichment_preserves_commit_and_verdict_and_identifies_text_changes() {
+        let sha = "0123456789012345678901234567890123456789";
+        let page = format!(
+            "<article><strong><a href='/checks/pkg/{sha}'>pkg 2-1</a></strong><strong class=capitalize>suspicious</strong></article>"
+        );
+        let summary = cretezy_with(&page, "pkg", "2-1", |_| None).unwrap();
+        let clean_page = page.replace(">suspicious<", ">safe<");
+        let clean = cretezy_with(&clean_page, "pkg", "2-1", |_| {
+            panic!("clean record needs no additional lookup")
+        })
+        .unwrap();
+        assert_eq!(clean.category, Category::Clean);
+        assert_eq!(clean.details, Some(Vec::new()));
+        let rich = |explanation: &str| {
+            cretezy_with(&page,"pkg","2-1", |commit| {
+            assert_eq!(commit,sha);
+            Some(serde_json::json!({"results":[{"package_base":"pkg","commits":[{"commit":sha,"assessment":{"verdict":"suspicious","version":"2-1","provider":"checker","model":"m","explanation":explanation}}]}]}).to_string())
+        }).unwrap()
+        };
+        let full = rich("Downloads while building");
+        assert_eq!(summary.category, Category::Suspicious);
+        assert_eq!(summary.summary, full.summary);
+        assert_eq!(summary.findings, full.findings);
+        assert_eq!(summary.url, full.url);
+        assert!(summary.details.is_none());
+        assert_eq!(
+            full.details.as_deref().unwrap(),
+            ["checker · m", "Downloads while building"]
+        );
+        assert_ne!(full, rich("An unpinned source"));
     }
 
     #[test]

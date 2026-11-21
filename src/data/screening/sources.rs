@@ -32,6 +32,7 @@ fn url(scanner: Scanner, name: &str) -> String {
 
 fn missing(scanner: Scanner, name: &str, reason: &str) -> Evidence {
     Evidence {
+        details: Some(Vec::new()),
         scanner,
         version: None,
         category: Category::Missing,
@@ -93,6 +94,7 @@ fn watch(doc: &str, name: &str, candidate: &str) -> Option<Evidence> {
         }
     }
     Some(Evidence {
+        details: Some(Vec::new()),
         scanner: Scanner::Aurwatch,
         version: Some(candidate.into()),
         category,
@@ -130,6 +132,15 @@ fn one(
         _ => None,
     };
     report
+        .map(|mut r| {
+            // Keep the published verdict when its optional explanation exceeds the display limits.
+            if r.details.as_ref().is_some_and(|details| {
+                details.len() > 128 || details.iter().map(String::len).sum::<usize>() > 65536
+            }) {
+                r.details = None;
+            }
+            r
+        })
         .filter(|r| {
             r.findings.len() <= 128 && r.findings.iter().map(String::len).sum::<usize>() <= 65536
         })

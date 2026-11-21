@@ -23,6 +23,9 @@ pub struct State {
     /// A clean lookup may clear an earlier block only if no newer block was recorded meanwhile.
     #[serde(default, skip_serializing_if = "zero")]
     pub aur_block_generation: u64,
+    /// Confirmations observed by this window while state.yaml was unwritable.
+    #[serde(skip)]
+    pub(crate) unsaved_aur_blocks: Blocks,
     /// The policy that deferred a package until a current clean scan.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub aur_deferrals: BTreeMap<String, Category>,
@@ -158,34 +161,73 @@ impl State {
         }
     }
 
+    /// Publish unsaved confirmations under the same lock as a review decision.
+    pub(crate) fn change_aur(&mut self, change: impl FnOnce(&mut State)) -> io::Result<()> {
+        let saved = Self::try_update(|disk| {
+            self.restore_confirmations(disk);
+            change(disk);
+        })?;
+        self.adopt_aur_decisions(saved);
+        Ok(())
+    }
+
+    fn restore_confirmations(&self, disk: &mut State) {
+        if !self.unsaved_aur_blocks.is_empty() {
+            for (release, sources) in &self.unsaved_aur_blocks {
+                disk.aur_malicious
+                    .entry(release.clone())
+                    .or_default()
+                    .extend(sources.clone());
+            }
+            disk.aur_block_generation = self
+                .aur_block_generation
+                .max(disk.aur_block_generation)
+                .wrapping_add(1);
+        }
+    }
+
+    fn adopt_aur_decisions(&mut self, saved: State) {
+        self.aur_holds = saved.aur_holds;
+        self.aur_deferrals = saved.aur_deferrals;
+        self.aur_trust = saved.aur_trust;
+        if saved.aur_block_generation >= self.aur_block_generation {
+            self.aur_malicious = saved.aur_malicious;
+            self.aur_block_generation = saved.aur_block_generation;
+            self.unsaved_aur_blocks.clear();
+        }
+    }
+
+    fn retain_unsaved_confirmations(&mut self, pending: &Pending) {
+        for (name, report) in &pending.screens {
+            for finding in report.evidence.iter().filter(|e| {
+                e.category == Category::Malicious && e.matches_candidate(&report.version)
+            }) {
+                self.unsaved_aur_blocks
+                    .entry(format!("{name}={}", report.version))
+                    .or_default()
+                    .insert(finding.scanner, finding.clone());
+            }
+        }
+    }
+
     pub fn refresh_aur_decisions(
         &mut self,
         pending: &mut Pending,
         settings: &crate::settings::Settings,
     ) {
-        // An unscreened window still learns about blocks recorded by other windows.
-        // An inventory without scanner results cannot invalidate their approvals.
         let assessed = settings.aur_screening || !pending.screens.is_empty();
-        let saved = if assessed {
-            Self::try_update(|state| state.reconcile(pending, settings))
+        let result = if assessed {
+            self.change_aur(|state| state.reconcile(pending, settings))
+        } else if !self.unsaved_aur_blocks.is_empty() {
+            self.change_aur(|_| {})
         } else {
-            Self::try_load()
+            Self::try_load().map(|state| self.adopt_aur_decisions(state))
         };
-        match saved {
-            Ok(state) => {
-                self.aur_holds = state.aur_holds;
-                self.aur_deferrals = state.aur_deferrals;
-                self.aur_trust = state.aur_trust;
-                if state.aur_block_generation >= self.aur_block_generation {
-                    self.aur_malicious = state.aur_malicious;
-                    self.aur_block_generation = state.aur_block_generation;
-                }
-            }
-            Err(e) => {
-                crate::warn!("AUR screening decisions could not be updated: {e}");
-                if assessed {
-                    self.reconcile(pending, settings);
-                }
+        if let Err(e) = result {
+            crate::warn!("AUR screening decisions could not be updated: {e}");
+            if assessed {
+                self.reconcile(pending, settings);
+                self.retain_unsaved_confirmations(pending);
             }
         }
         self.show_malicious(pending);
@@ -245,7 +287,7 @@ impl State {
                 .aur_malicious
                 .contains_key(&format!("{name}={}", trusted.version))
                 && match pending.screens.get(name) {
-                    Some(report) => report == trusted,
+                    Some(report) => trusted.retains_approval(report),
                     None => !complete,
                 }
         });
@@ -315,6 +357,7 @@ mod tests {
                 category: Category::Minor,
                 summary: "Yellow".into(),
                 findings: vec!["Unpinned source".into()],
+                details: Some(Vec::new()),
                 url: String::new(),
             }],
         );
@@ -339,6 +382,41 @@ mod tests {
     }
 
     #[test]
+    fn recovery_keeps_unwritten_confirmations_and_merges_other_windows_blocks() {
+        let finding = Evidence {
+            scanner: Scanner::Wtako,
+            version: Some("2-1".into()),
+            category: Category::Malicious,
+            summary: "Black flag".into(),
+            findings: vec![],
+            details: Some(vec![]),
+            url: String::new(),
+        };
+        let reports =
+            |name: &str| BTreeMap::from([(name.into(), Report::new("2-1", vec![finding.clone()]))]);
+        let mut pending = crate::data::updates::parse("aur\tpkg\t1-1\t2-1\n");
+        pending.screens = reports("pkg");
+        let mut window = State::default();
+        window.reconcile(&pending, &Default::default());
+        window.retain_unsaved_confirmations(&pending);
+        let local_generation = window.aur_block_generation;
+        window.adopt_aur_decisions(State::default());
+        assert!(window.is_malicious("pkg", "2-1"));
+        assert_eq!(window.aur_block_generation, local_generation);
+
+        // Another window observed a different block while this one couldn't save.
+        let mut disk = State::default();
+        disk.observe_malicious(&reports("other"), None);
+        window.restore_confirmations(&mut disk);
+        disk.aur_holds.insert("unrelated".into(), "1-1".into());
+        window.adopt_aur_decisions(disk);
+        assert!(window.aur_block_generation > local_generation);
+        assert!(window.is_malicious("pkg", "2-1") && window.is_malicious("other", "2-1"));
+        assert!(window.aur_holds.contains_key("unrelated"));
+        assert!(window.unsaved_aur_blocks.is_empty());
+    }
+
+    #[test]
     fn confirmed_findings_survive_outages_disabled_sources_and_other_clean_reports() {
         let e = |scanner, category, version: &str| Evidence {
             scanner,
@@ -346,6 +424,7 @@ mod tests {
             category,
             summary: "provider verdict".into(),
             findings: vec![],
+            details: Some(Vec::new()),
             url: String::new(),
         };
         let mut state = State::default();
@@ -393,6 +472,7 @@ aur-malicious:
             category: Category::Malicious,
             summary: "black".into(),
             findings: vec![],
+            details: Some(Vec::new()),
             url: "reported".into(),
         };
         next.screens
@@ -416,6 +496,7 @@ aur-malicious:
                         category,
                         summary: String::new(),
                         findings: vec![],
+                        details: Some(Vec::new()),
                         url: String::new(),
                     }],
                 ),
@@ -446,6 +527,7 @@ aur-malicious:
                         category,
                         summary: "grade".into(),
                         findings: vec![],
+                        details: Some(Vec::new()),
                         url: String::new(),
                     }],
                 ),

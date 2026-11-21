@@ -1592,3 +1592,9 @@ msgstr "Prüfbericht wird geöffnet"
 
 msgid "Could not open the scan report\n"
 msgstr "Der Prüfbericht konnte nicht geöffnet werden\n"
+
+msgid "Selected AUR updates failed\nCheck the helper output for details.\n"
+msgstr "Ausgewählte AUR-Updates fehlgeschlagen\nDie Ausgabe des AUR-Helfers enthält weitere Details.\n"
+
+msgid "Detailed findings unavailable. Check again before approving."
+msgstr "Die Einzelbefunde sind nicht verfügbar. Vor der Freigabe erneut prüfen."

@@ -816,6 +816,71 @@ git -C "$dir" pull --ff-only
 }
 
 #[test]
+fn selected_helper_workspace_is_private_and_removed_for_every_outcome() {
+    let s = Sandbox::new("screened-build-cache");
+    local_aur(&s);
+    recipe(
+        &s,
+        "good",
+        "pkgbase = good\npkgver = 2\npkgrel = 1\npkgname = good\n",
+    );
+    s.stub("checkupdates", "exit 2");
+    s.stub("pacman", "exit 0");
+    let dir = s.dir.join("cache with spaces");
+    for (cache, status, version_status, code, guarded) in [
+        (dir.to_str().unwrap(), 0, 0, 0, false),
+        ("", 1, 0, 22, false),
+        ("relative", 130, 0, 21, false),
+        ("", 127, 127, 127, false),
+        (dir.to_str().unwrap(), 1, 0, 22, true),
+    ] {
+        s.stub(
+            "paru",
+            &format!(
+                r#"
+case $1 in
+-Qua) echo 'good 1-1 -> 2-1' ;;
+--version) exit {version_status} ;;
+*) work="${{!#}}"; work="${{work%/recipes/good}}"
+   [[ $(stat -c %a -- "$work") == 700 ]] || exit 80
+   printf '%s\n' "$work" > "$HOME/last-work"
+   exit {status} ;;
+esac
+"#
+            ),
+        );
+        let args = if guarded {
+            vec![
+                "run", "guarded", "--blocks", "2", "clear", "good", "2-1", "good",
+            ]
+        } else {
+            vec!["run", "screened", "good", "2-1", "good"]
+        };
+        let o = s.run(
+            "upgrade",
+            &args,
+            &[
+                ("SM_AUR", "paru"),
+                ("SM_AUR_REVIEW", "off"),
+                ("XDG_CACHE_HOME", cache),
+                ("SM_AUR_BLOCK_GENERATION", "2"),
+            ],
+        );
+        assert_eq!(o.code, code, "{}{}", o.events, o.err);
+        assert!(!o.events.contains("fail\t"));
+        let recorded = std::fs::read_to_string(s.dir.join("last-work")).unwrap();
+        let work = std::path::Path::new(recorded.trim_end());
+        let expected = if std::path::Path::new(cache).is_absolute() {
+            dir.clone()
+        } else {
+            s.dir.join(".cache")
+        };
+        assert_eq!(work.parent(), Some(expected.as_path()));
+        assert!(!work.exists());
+    }
+}
+
+#[test]
 fn screened_group_supplies_another_selected_packages_prerequisites() {
     let s = Sandbox::new("screened-group-provides");
     local_aur(&s);

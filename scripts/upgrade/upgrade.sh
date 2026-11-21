@@ -140,7 +140,14 @@ screened() {
     2) [[ -z $pending ]] || exit 15 ;;
     *) exit 10 ;;
     esac
-    scratch
+    # A local -Bi checkout is also makepkg's build tree when BUILDDIR is unset.
+    local cache=${XDG_CACHE_HOME:-$HOME/.cache}
+    [[ $cache == /* ]] || cache=$HOME/.cache
+    (
+        umask 077
+        mkdir -p -- "$cache"
+    )
+    TMPDIR="$cache" scratch
     status=0
     pending=$(aur -Qua 2>"$work/errors") || status=$?
     if ((status > 1)) || [[ -s $work/errors ]]; then
@@ -192,19 +199,13 @@ screened() {
                 fi
                 seen["$current"]=1
                 ;;
-            depends | makedepends | checkdepends | "depends_$arch" | "makedepends_$arch" | "checkdepends_$arch")
-                if [[ -z $current || -v selected[$current] ]]; then
-                    [[ $value =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+:~\<\>\=\-]*$ ]] || exit 19
-                    dependencies+=("$value")
-                fi
-                ;;
             esac
         done <<<"$metadata"
         [[ $actual_base == "$base" && -n $pkgver && -n $pkgrel ]] || exit 19
         version=$pkgver-$pkgrel
         [[ -z $epoch || $epoch == 0 ]] || version=$epoch:$version
         [[ $version == "${bases[$base]}" ]] || exit 14
-        collect_provisions "$base" "$arch" "$metadata" || exit 19
+        collect_prerequisites "$base" "$arch" "$metadata" || exit 19
     done
     for name in "${!selected[@]}"; do
         [[ -v seen[$name] ]] || exit 19
@@ -229,7 +230,14 @@ screened() {
         fi
         printf 'terminal\toff\n' >&3
     fi
-    aur_sync -Bi "${ignored[@]}" -- "${dirs[@]}"
+    if aur_sync -Bi "${ignored[@]}" -- "${dirs[@]}"; then
+        return 0
+    else
+        status=$?
+    fi
+    if ! aur --version >/dev/null 2>&1; then exit "$status"; fi
+    if ((status == 130)); then exit 21; fi
+    exit 22
 }
 
 # Repositories first, then what is built on top of them. A failing AUR helper

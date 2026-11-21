@@ -40,20 +40,18 @@ pub fn bulk(candidates: &[(String, String)]) -> Result<Vec<String>, Failure> {
         args.extend([name.clone(), version.clone(), pkg.package_base.clone()]);
     }
     let state = State::try_load().map_err(|_| rejected())?;
-    finalize(args, &state, &packages)
+    let releases = resolve(&state, &packages);
+    bound_plan(args, &state, &releases)
 }
 
-/// Unknown or currently published blocked releases can enter a transaction
-/// through new dependencies. In that case only installed or selected packages
-/// may supply its prerequisites. An old version no longer offered by the AUR
-/// does not impose that restriction.
-pub(super) fn finalize(
-    args: Vec<String>,
+/// Look up remembered releases before checking final authorization. A name missing
+/// from the returned map had no authoritative response.
+pub(super) fn resolve(
     state: &State,
     packages: &[Package],
-) -> Result<Vec<String>, Failure> {
-    if !state.has_malicious() && args.first().is_some_and(|s| s == "screened") {
-        return Ok(args);
+) -> BTreeMap<String, Option<(String, String)>> {
+    if !state.has_malicious() {
+        return BTreeMap::new();
     }
     let mut releases: BTreeMap<_, _> = packages
         .iter()
@@ -101,14 +99,17 @@ pub(super) fn finalize(
             Err(_) => break,
         }
     }
-    bound_plan(args, state, &releases)
+    releases
 }
 
-fn bound_plan(
+pub(super) fn bound_plan(
     mut args: Vec<String>,
     state: &State,
     releases: &BTreeMap<String, Option<(String, String)>>,
 ) -> Result<Vec<String>, Failure> {
+    if !state.has_malicious() && args.first().is_some_and(|s| s == "screened") {
+        return Ok(args);
+    }
     let mut strict = false;
     for key in state.aur_malicious.keys() {
         let (name, version) = key.split_once('=').ok_or_else(rejected)?;
@@ -155,6 +156,7 @@ mod tests {
                 category: Category::Malicious,
                 summary: "Black flag".into(),
                 findings: vec![],
+                details: Some(Vec::new()),
                 url: String::new(),
             }],
         );

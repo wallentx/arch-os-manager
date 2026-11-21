@@ -981,6 +981,18 @@ impl Page for RunPage {
                 }
                 self.verifying = None;
             }
+            if self.job.op == op::UPGRADE_RUN
+                && self.job.args.first().is_none_or(|s| s != "system")
+                && !ctx.state.unsaved_aur_blocks.is_empty()
+                && let Err(e) = ctx.state.change_aur(|_| {})
+            {
+                self.outcome = Some((
+                    Err(Failure::new(self.job.op, e.to_string())),
+                    Instant::now(),
+                ));
+                ctx.recheck();
+                return;
+            }
             // The terminal starts at the size the details give it, so showing them resizes nothing.
             let terminal = split(area, ctx.settings.terminal()).1;
             self.size = (terminal.height, terminal.width);

@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 fn report(name: &str, candidate: &str, entry: Option<&Value>) -> Evidence {
     let mut evidence = Evidence {
+        details: Some(Vec::new()),
         scanner: Scanner::Wtako,
         version: None,
         category: Category::Missing,

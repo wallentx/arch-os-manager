@@ -171,6 +171,7 @@ pub(super) fn report(
         findings = vec!["Detailed audit records unavailable".into()];
     }
     Some(Evidence {
+        details: Some(Vec::new()),
         scanner: Scanner::AurSleuth,
         version: Some(candidate.into()),
         category,
