@@ -3,6 +3,10 @@ ops:
     title: Checking for updates
   idle:
     title: Waiting for the running update
+  scan:
+    title: Checking AUR security findings
+  audit:
+    title: Checking AUR security findings
   run:
     title: Updating the system
     root: true
@@ -23,7 +27,35 @@ errors:
   13: |
     AUR unreachable
     Everything else is up to date.
+  14: |
+    AUR selection changed
+    Refresh updates and select the packages again.
+  15: |
+    Official updates are pending
+    Install the official updates before updating selected AUR packages.
+  16: |
+    AUR screening is enabled
+    Select the AUR packages on the Update page.
+  17: |
+    AUR check failed
+    Refresh updates before trying again.
+  18: |
+    AUR updates share dependencies or a build
+    Keep this group held until its prerequisites and split packages can be included.
+  19: |
+    AUR build metadata could not be verified
+    Refresh updates before trying again.
+  20: |
+    Split package selection is incomplete
+    The helper builds this recipe as a group. Every output must be selected.
+  21: |
+    AUR update canceled
+  22: |
+    Selected AUR updates failed
+    Check the helper output for details.
 declined:
+  22: |
+    AUR update canceled
   11: |
     AUR update canceled
     Everything else is up to date.

@@ -1,5 +1,7 @@
 //! Settings: what is written to settings.yaml, and what follows from it on the system.
 
+pub(crate) mod screening;
+
 use std::time::Instant;
 
 use ratatui::buffer::Buffer;
@@ -68,6 +70,10 @@ impl SettingsPage {
             ),
             Target::Flatpak => {
                 let (text, tone) = on_off(ctx.settings.flatpak.unwrap_or(true));
+                (text.into(), tone, false)
+            }
+            Target::AurScreening => {
+                let (text, tone) = on_off(ctx.settings.aur_screening);
                 (text.into(), tone, false)
             }
             Target::AurReview => {
@@ -171,7 +177,7 @@ impl Page for SettingsPage {
         let aur = script::aur().is_some();
         let shown = |t: Target| match t {
             Target::Flatpak => flatpak,
-            Target::AurReview => aur,
+            Target::AurReview | Target::AurScreening => aur,
             _ => true,
         };
         let mut rows = Vec::new();
@@ -266,6 +272,7 @@ impl Page for SettingsPage {
                 ctx.save_settings();
                 Flow::Stay
             }
+            Target::AurScreening => Flow::Push(screening::open()),
             Target::AurReview => {
                 let on = !ctx.settings.aur_review.unwrap_or(true);
                 ctx.settings.aur_review = crate::settings::switch(on);

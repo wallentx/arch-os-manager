@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 
 use crate::ui::{App, FRAME, Key, Msg, Target};
@@ -28,6 +28,7 @@ pub fn run(start: Option<Target>) -> std::io::Result<()> {
                     }
                 }),
                 Event::Mouse(m) => match m.kind {
+                    MouseEventKind::Down(MouseButton::Left) => Some(Msg::Click(m.column, m.row)),
                     MouseEventKind::ScrollUp => Some(Msg::Key(Key::WheelUp)),
                     MouseEventKind::ScrollDown => Some(Msg::Key(Key::WheelDown)),
                     _ => None,

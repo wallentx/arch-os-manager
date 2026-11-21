@@ -211,6 +211,8 @@ pub const QUEUE: usize = 1024;
 
 pub enum Msg {
     Key(Key),
+    /// A left click, in the same cell coordinates used for drawing.
+    Click(u16, u16),
     /// A key held down, sent again by the keyboard's repeat.
     Held(Key),
     Tick,
@@ -252,6 +254,7 @@ pub fn end_on_signals(tx: SyncSender<Msg>, wake: Arc<dyn Fn() + Send + Sync>) {
 pub enum Fresh {
     Features(Result<Features, Failure>),
     System(Result<System, Failure>),
+    UpdateList(Result<Pending, Failure>),
     Updates(Result<Pending, Failure>),
     News(Result<(Vec<Item>, bool), Failure>),
     Installed(Result<Vec<Installed>, Failure>),
@@ -280,6 +283,7 @@ pub enum Flow {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
+    Screening(crate::data::screening::Category),
     Normal,
     Muted,
     Accent,
@@ -293,6 +297,7 @@ pub enum Tone {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Does {
     Choose,
+    SelectLink,
     Scroll,
     Open,
     /// Opens the marked rows, this many.
@@ -326,6 +331,7 @@ impl Does {
         match self {
             Does::OpenMarked(n) => return tf("open {n}", &[("n", &n)]),
             Does::Choose => t("choose"),
+            Does::SelectLink => t("select link"),
             Does::Scroll => t("scroll"),
             Does::Open => t("open"),
             Does::Run => t("run"),
@@ -365,6 +371,9 @@ pub trait Page {
     /// The keys the footer names, as key and what it does.
     fn hints(&self, ctx: &Ctx) -> Vec<(&'static str, Does)>;
     fn key(&mut self, key: Key, ctx: &mut Ctx) -> Flow;
+    fn click(&mut self, _x: u16, _y: u16, _ctx: &mut Ctx) -> Flow {
+        Flow::Ignored
+    }
     /// A job of this page is done: its result is ready to take.
     fn done(&mut self, _ctx: &mut Ctx) -> Flow {
         Flow::Stay

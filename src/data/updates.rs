@@ -25,6 +25,10 @@ pub struct Update {
 pub struct Pending {
     pub updates: Vec<Update>,
     pub failed: Vec<Source>,
+    /// The inventory is ready while public reports are still loading.
+    pub screening: bool,
+    pub scan_generation: Option<u64>,
+    pub screens: std::collections::BTreeMap<String, super::screening::Report>,
 }
 
 pub fn parse(out: &str) -> Pending {

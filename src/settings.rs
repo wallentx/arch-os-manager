@@ -4,7 +4,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::data::cleanup::Part;
+use crate::data::{
+    cleanup::Part,
+    screening::{Category, Policy, Scanner},
+};
 
 #[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -24,6 +27,13 @@ pub struct Settings {
     /// The AUR helper's review before it builds, on unless switched off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aur_review: Option<bool>,
+    /// Allow enabled screening services to look up pending AUR updates.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub aur_screening: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aur_screening_sources: BTreeMap<Scanner, bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aur_screening_policies: BTreeMap<Category, Policy>,
     /// How a run shows, one of `OUTPUT`, compact unless chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
@@ -126,7 +136,74 @@ impl Settings {
         {
             return Err(format!("output: {o} is not one of {}", OUTPUT.join(", ")));
         }
+        for (category, policy) in &s.aur_screening_policies {
+            if matches!(category, Category::Clean | Category::Malicious) {
+                if *policy != Self::default_screening_policy(*category) {
+                    return Err(format!(
+                        "aur-screening-policies: {} has a fixed policy",
+                        category.id()
+                    ));
+                }
+            } else if *policy == Policy::Allow {
+                return Err(format!(
+                    "aur-screening-policies: {} requires inspect, defer or block",
+                    category.id()
+                ));
+            }
+        }
+        s.aur_screening_sources.retain(|_, enabled| !*enabled);
+        s.aur_screening_policies
+            .retain(|category, policy| *policy != Self::default_screening_policy(*category));
         Ok(s)
+    }
+
+    /// Source choices persist when screening is switched off. Unspecified sources are enabled.
+    pub fn scanner_enabled(&self, scanner: Scanner) -> bool {
+        self.aur_screening_sources
+            .get(&scanner)
+            .copied()
+            .unwrap_or(true)
+    }
+
+    pub fn set_scanner_enabled(&mut self, scanner: Scanner, enabled: bool) {
+        if enabled {
+            self.aur_screening_sources.remove(&scanner);
+        } else {
+            self.aur_screening_sources.insert(scanner, false);
+        }
+    }
+
+    pub fn screening_policy(&self, category: Category) -> Policy {
+        match category {
+            Category::Clean => Policy::Allow,
+            Category::Malicious => Policy::Block,
+            _ => self
+                .aur_screening_policies
+                .get(&category)
+                .copied()
+                .filter(|&p| p != Policy::Allow)
+                .unwrap_or_else(|| Self::default_screening_policy(category)),
+        }
+    }
+
+    fn default_screening_policy(category: Category) -> Policy {
+        match category {
+            Category::Clean => Policy::Allow,
+            Category::Minor => Policy::Inspect,
+            Category::Missing => Policy::Defer,
+            Category::Suspicious | Category::Malicious => Policy::Block,
+        }
+    }
+
+    pub fn set_screening_policy(&mut self, category: Category, policy: Policy) {
+        if matches!(category, Category::Clean | Category::Malicious) || policy == Policy::Allow {
+            return;
+        }
+        if Self::default_screening_policy(category) == policy {
+            self.aur_screening_policies.remove(&category);
+        } else {
+            self.aur_screening_policies.insert(category, policy);
+        }
     }
 
     /// The time between two announcements, which the timer keeps and a notification waits for an
@@ -220,6 +297,9 @@ mod tests {
             status: Some(false),
             aur_helper: Some("yay".into()),
             aur_review: Some(false),
+            aur_screening: true,
+            aur_screening_sources: BTreeMap::from([(Scanner::Wtako, false)]),
+            aur_screening_policies: BTreeMap::from([(Category::Missing, Policy::Inspect)]),
             output: Some("verbose".into()),
             app_menu: Some(false),
             notify: Some("daily".into()),
@@ -229,6 +309,74 @@ mod tests {
         };
         let yaml = serde_saphyr::to_string(&s).unwrap();
         assert_eq!(Settings::parse(&yaml).unwrap(), s);
+    }
+
+    #[test]
+    fn screening_defaults_apply_to_existing_boolean_settings() {
+        let mut settings = Settings::parse("aur-screening: true").unwrap();
+        assert!(settings.aur_screening);
+        assert!(
+            Scanner::ALL
+                .into_iter()
+                .all(|scanner| settings.scanner_enabled(scanner))
+        );
+        assert_eq!(settings.screening_policy(Category::Missing), Policy::Defer);
+        assert_eq!(settings.screening_policy(Category::Minor), Policy::Inspect);
+        assert_eq!(
+            settings.screening_policy(Category::Suspicious),
+            Policy::Block
+        );
+        for scanner in Scanner::ALL {
+            settings.set_scanner_enabled(scanner, false);
+        }
+        assert!(settings.aur_screening);
+        assert!(
+            Scanner::ALL
+                .into_iter()
+                .all(|scanner| !settings.scanner_enabled(scanner))
+        );
+        settings.set_screening_policy(Category::Minor, Policy::Defer);
+        assert_eq!(settings.screening_policy(Category::Minor), Policy::Defer);
+        for scanner in Scanner::ALL {
+            settings.set_scanner_enabled(scanner, true);
+        }
+        settings.set_screening_policy(Category::Minor, Policy::Inspect);
+        assert!(settings.aur_screening_sources.is_empty());
+        assert!(settings.aur_screening_policies.is_empty());
+    }
+
+    #[test]
+    fn clean_and_compromised_policies_cannot_be_overridden() {
+        for category in [Category::Clean, Category::Malicious] {
+            assert!(
+                Settings::parse(&format!(
+                    "aur-screening-policies: {{{}: inspect}}",
+                    category.id()
+                ))
+                .is_err()
+            );
+        }
+        assert!(
+            Settings::parse(&format!(
+                "aur-screening-policies: {{{}: allow}}",
+                Category::Minor.id()
+            ))
+            .is_err()
+        );
+        let unchanged = format!(
+            "aur-screening-policies: {{{}: block, {}: allow}}",
+            Category::Malicious.id(),
+            Category::Clean.id()
+        );
+        assert_eq!(Settings::parse(&unchanged).unwrap(), Settings::default());
+        let mut settings = Settings::default();
+        settings.set_screening_policy(Category::Clean, Policy::Block);
+        settings.set_screening_policy(Category::Malicious, Policy::Inspect);
+        assert_eq!(settings.screening_policy(Category::Clean), Policy::Allow);
+        assert_eq!(
+            settings.screening_policy(Category::Malicious),
+            Policy::Block
+        );
     }
 
     #[test]

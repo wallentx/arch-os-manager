@@ -1424,3 +1424,177 @@ msgstr "Fortschritt, Rückfragen als Dialog"
 
 msgid "terminal, every command and prompt"
 msgstr "Terminal, alle Befehle und Rückfragen"
+
+msgid "AUR check failed\nRefresh updates before trying again.\n"
+msgstr "AUR-Prüfung fehlgeschlagen\nDie Aktualisierungen vor einem neuen Versuch erneut abfragen.\n"
+
+msgid "AUR screening is enabled\nSelect the AUR packages on the Update page.\n"
+msgstr "Die AUR-Sicherheitsprüfung ist aktiv\nDie AUR-Pakete auf der Aktualisierungsseite auswählen.\n"
+
+msgid "AUR selection changed\nRefresh updates and select the packages again.\n"
+msgstr "Die AUR-Auswahl hat sich geändert\nDie Aktualisierungen erneut abfragen und die Pakete neu auswählen.\n"
+
+msgid "Candidate version"
+msgstr "Angebotene Version"
+
+msgid "Checking AUR security findings"
+msgstr "AUR-Sicherheitsbefunde werden abgefragt"
+
+msgid "Could not save decision"
+msgstr "Die Entscheidung konnte nicht gespeichert werden"
+
+msgid "Group"
+msgstr "Gruppe"
+
+msgid "Official updates are pending\nInstall the official updates before updating selected AUR packages.\n"
+msgstr "Offizielle Updates stehen aus\nVor den ausgewählten AUR-Paketen die offiziellen Updates installieren.\n"
+
+msgid "Defer this update"
+msgstr "Dieses Update zurückstellen"
+
+msgid "Cancel deferral"
+msgstr "Zurückstellung aufheben"
+
+msgid "This update is no longer pending."
+msgstr "Dieses Update steht nicht mehr aus."
+
+msgid "Update official packages and Flatpaks"
+msgstr "Offizielle Pakete und Flatpaks aktualisieren"
+
+msgid "AUR build metadata could not be verified\nRefresh updates before trying again.\n"
+msgstr "Die AUR-Baumetadaten konnten nicht bestätigt werden\nDie Aktualisierungen vor einem neuen Versuch erneut abfragen.\n"
+
+msgid "AUR updates share dependencies or a build\nKeep this group held until its prerequisites and split packages can be included.\n"
+msgstr "Die AUR-Updates haben gemeinsame Abhängigkeiten oder einen gemeinsamen Bauvorgang\nDiese Gruppe zurückhalten, bis ihre Abhängigkeiten und Teilpakete berücksichtigt werden können.\n"
+
+msgid "Install this AUR update"
+msgstr "Dieses AUR-Update installieren"
+
+msgid "Split package selection is incomplete\nThe helper builds this recipe as a group. Every output must be selected.\n"
+msgstr "Die Auswahl der Teilpakete ist unvollständig\nDer Helfer baut dieses Rezept als Gruppe. Alle Teilpakete müssen ausgewählt sein.\n"
+
+msgid "AUR update canceled\n"
+msgstr "AUR-Aktualisierung abgebrochen\n"
+
+msgid "AUR findings"
+msgstr "AUR-Prüfbefunde"
+
+msgid "AUR update screening"
+msgstr "AUR-Sicherheitsprüfung"
+
+msgid "All sources are off. Pending updates have no scan."
+msgstr "Alle Quellen sind aus. Für ausstehende Updates liegt kein Prüfergebnis vor."
+
+msgid "Allow"
+msgstr "Zulassen"
+
+msgid "Always blocked"
+msgstr "Immer gesperrt"
+
+msgid "Approve this version and its findings"
+msgstr "Diese Version mit den angezeigten Befunden freigeben"
+
+msgid "Approved"
+msgstr "Freigegeben"
+
+msgid "Block"
+msgstr "Sperren"
+
+msgid "Blocked: {category}"
+msgstr "Gesperrt: {category}"
+
+msgid "Confirmed malicious"
+msgstr "Bestätigte Schadsoftware"
+
+msgid "Defer"
+msgstr "Zurückstellen"
+
+msgid "Deferred: {category}"
+msgstr "Zurückgestellt: {category}"
+
+msgid "Eligible"
+msgstr "Installierbar"
+
+msgid "Enable AUR update screening to select other AUR updates."
+msgstr "Die AUR-Sicherheitsprüfung einschalten, um weitere AUR-Updates auszuwählen."
+
+msgid "Inspect"
+msgstr "Prüfen"
+
+msgid "Inspect AUR findings"
+msgstr "AUR-Prüfbefunde ansehen"
+
+msgid "Inspect: {category}"
+msgstr "Prüfen: {category}"
+
+msgid "Installation stays blocked while this category applies."
+msgstr "Die Installation bleibt gesperrt, solange diese Einstufung gilt."
+
+msgid "Minor findings"
+msgstr "Geringfügige Befunde"
+
+msgid "Missing scan"
+msgstr "Fehlender Prüfbericht"
+
+msgid "No findings"
+msgstr "Ohne Befund"
+
+msgid "No scan is available for this version."
+msgstr "Für diese Version liegt kein Prüfbericht vor."
+
+msgid "Deferred"
+msgstr "Zurückgestellt"
+
+msgid "Revoke approval"
+msgstr "Freigabe widerrufen"
+
+msgid "Scan sources"
+msgstr "Prüfquellen"
+
+msgid "Screen pending AUR updates"
+msgstr "Ausstehende AUR-Updates prüfen"
+
+msgid "Suspicious findings"
+msgstr "Verdächtige Befunde"
+
+msgid "The update waits for a clean scan."
+msgstr "Das Update wartet auf eine Prüfung ohne Befund."
+
+msgid "Update approved AUR packages"
+msgstr "Freigegebene AUR-Pakete aktualisieren"
+
+msgid "Update clean AUR packages"
+msgstr "AUR-Pakete ohne Befund aktualisieren"
+
+msgid "Update clean and approved AUR packages"
+msgstr "AUR-Pakete ohne Befund und freigegebene Pakete aktualisieren"
+
+msgid "Update policies"
+msgstr "Update-Regeln"
+
+msgid "You can approve the update after inspecting its reports."
+msgstr "Nach dem Lesen der Prüfberichte lässt sich das Update freigeben."
+
+msgid "state.yaml not saved: {error}"
+msgstr "state.yaml nicht gespeichert: {error}"
+
+msgid "Checking AUR scan sources"
+msgstr "AUR-Prüfquellen werden abgefragt"
+
+msgid "No scan sources are enabled."
+msgstr "Es sind keine Prüfquellen aktiviert."
+
+msgid "select link"
+msgstr "Link auswählen"
+
+msgid "Opening the scan report"
+msgstr "Prüfbericht wird geöffnet"
+
+msgid "Could not open the scan report\n"
+msgstr "Der Prüfbericht konnte nicht geöffnet werden\n"
+
+msgid "Selected AUR updates failed\nCheck the helper output for details.\n"
+msgstr "Ausgewählte AUR-Updates fehlgeschlagen\nDie Ausgabe des AUR-Helfers enthält weitere Details.\n"
+
+msgid "Detailed findings unavailable. Check again before approving."
+msgstr "Die Einzelbefunde sind nicht verfügbar. Vor der Freigabe erneut prüfen."

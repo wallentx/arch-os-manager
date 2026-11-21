@@ -26,6 +26,7 @@ pub enum Target {
     Status,
     AurHelper,
     AurReview,
+    AurScreening,
     Output,
     Flatpak,
     Notifications,
@@ -60,6 +61,7 @@ pub const SETTINGS: &[&[Target]] = &[
     &[
         Target::AurHelper,
         Target::AurReview,
+        Target::AurScreening,
         Target::Flatpak,
         Target::Notifications,
         Target::Desktop,
@@ -88,6 +90,7 @@ pub const ALL: &[Target] = &[
     Target::Output,
     Target::AurHelper,
     Target::AurReview,
+    Target::AurScreening,
     Target::Flatpak,
     Target::Notifications,
     Target::Desktop,
@@ -117,6 +120,7 @@ impl Target {
             Target::Status => "status",
             Target::AurHelper => "aur-helper",
             Target::AurReview => "aur-review",
+            Target::AurScreening => "aur-screening",
             Target::Output => "output",
             Target::Flatpak => "flatpak",
             Target::Notifications => "notifications",
@@ -150,6 +154,7 @@ impl Target {
             Target::Status => t("Main menu status"),
             Target::AurHelper => t("AUR helper"),
             Target::AurReview => t("AUR review"),
+            Target::AurScreening => t("AUR update screening"),
             Target::Output => t("Output"),
             Target::Flatpak => t("Flatpak updates"),
             Target::Notifications => t("Update notification"),
@@ -179,7 +184,7 @@ impl Target {
             Target::Usage => icon::USAGE,
             Target::Status => icon::STATUS,
             Target::AurHelper => icon::ARCH,
-            Target::AurReview => icon::CODE,
+            Target::AurReview | Target::AurScreening => icon::CODE,
             Target::Output => icon::COMMAND,
             Target::Flatpak => icon::APP,
             Target::Notifications => icon::NOTIFICATION,
@@ -209,7 +214,7 @@ impl Target {
         let features = ctx.features()?;
         match self {
             Target::Flatpak => (!features.ok("flatpak")).then_some("flatpak"),
-            Target::AurReview => crate::script::aur()
+            Target::AurReview | Target::AurScreening => crate::script::aur()
                 .is_none()
                 .then_some(crate::settings::AUR_HELPERS[0]),
             _ => crate::script::missing(self.script()?, features),
@@ -255,6 +260,7 @@ impl Target {
             Target::Settings => Box::new(pages::settings::SettingsPage::new(None)),
             Target::Features => Box::new(pages::features::FeaturesPage::new(None)),
             Target::About => Box::new(pages::settings::AboutPage::new()),
+            Target::AurScreening => pages::settings::screening::open(),
             Target::Language
             | Target::Theme
             | Target::AurHelper

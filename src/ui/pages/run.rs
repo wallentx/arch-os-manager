@@ -1,16 +1,21 @@
 //! A script run: asked first where it says so, the password once, then shown as it works.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style as Cell};
 
-use crate::data::cleanup::Part;
+use crate::data::{
+    cleanup::Part,
+    screening::{self, Report},
+};
 use crate::i18n::{t, tf, tn};
 use crate::script::{self, Failure, Op, Phase, Prompt, Run, op};
 use crate::ui::detail::{Act, Block, Detail, done, failure, show};
 use crate::ui::draw::{BAR, card, center, cut, cut_front, put, scrollbar, waiting, width, wrap};
+use crate::ui::fetch::Task;
 use crate::ui::icon;
 use crate::ui::input::Input;
 use crate::ui::list::Lead;
@@ -26,9 +31,26 @@ const NOTCH: isize = 3;
 const INSIST: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(10)];
 
 #[derive(Clone)]
+enum AurPlan {
+    Screened(BTreeMap<String, Report>),
+    Guarded(Vec<(String, String)>),
+}
+
+impl AurPlan {
+    fn prepare(&self) -> Result<Vec<String>, Failure> {
+        match self {
+            Self::Screened(reports) => screening::verify(reports),
+            Self::Guarded(candidates) => screening::guard::bulk(candidates),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Job {
     pub op: Op,
     pub args: Vec<String>,
+    /// The version and findings the user saw for each selected AUR update.
+    aur_plan: Option<AurPlan>,
     /// Asked before the run, replacing the yaml's confirm: question, then the irreversible effect.
     pub confirm: Option<String>,
     /// The action as the person chose it, which the header names.
@@ -40,8 +62,23 @@ impl Job {
         Job {
             op,
             args,
+            aur_plan: None,
             confirm: None,
             name: None,
+        }
+    }
+
+    pub fn screened(reports: BTreeMap<String, Report>) -> Job {
+        Job {
+            aur_plan: Some(AurPlan::Screened(reports)),
+            ..Job::new(op::UPGRADE_RUN, vec![])
+        }
+    }
+
+    pub fn guarded(candidates: Vec<(String, String)>) -> Job {
+        Job {
+            aur_plan: Some(AurPlan::Guarded(candidates)),
+            ..Job::new(op::UPGRADE_RUN, vec![])
         }
     }
 
@@ -444,6 +481,7 @@ fn headline(outcome: &Result<(), Failure>) -> String {
 }
 
 pub struct RunPage {
+    verifying: Option<Task<Result<Vec<String>, Failure>>>,
     job: Job,
     run: Option<Run>,
     outcome: Option<(Result<(), Failure>, Instant)>,
@@ -472,6 +510,7 @@ pub struct RunPage {
 impl RunPage {
     pub fn new(job: Job) -> RunPage {
         RunPage {
+            verifying: None,
             job,
             run: None,
             outcome: None,
@@ -915,6 +954,45 @@ impl Page for RunPage {
 
     fn draw(&mut self, area: Rect, buf: &mut Buffer, ctx: &mut Ctx) {
         if self.run.is_none() && self.outcome.is_none() {
+            if let Some(plan) = &self.job.aur_plan {
+                let task = self.verifying.get_or_insert_with(|| {
+                    let plan = plan.clone();
+                    Task::start(ctx, move || plan.prepare())
+                });
+                match task.take() {
+                    None => {
+                        waiting(
+                            buf,
+                            area,
+                            t("Checking AUR security findings"),
+                            None,
+                            None,
+                            ctx,
+                        );
+                        return;
+                    }
+                    Some(Ok(args)) => self.job.args = args,
+                    Some(Err(failure)) => {
+                        self.outcome = Some((Err(failure), Instant::now()));
+                        self.verifying = None;
+                        ctx.recheck();
+                        return;
+                    }
+                }
+                self.verifying = None;
+            }
+            if self.job.op == op::UPGRADE_RUN
+                && self.job.args.first().is_none_or(|s| s != "system")
+                && !ctx.state.unsaved_aur_blocks.is_empty()
+                && let Err(e) = ctx.state.change_aur(|_| {})
+            {
+                self.outcome = Some((
+                    Err(Failure::new(self.job.op, e.to_string())),
+                    Instant::now(),
+                ));
+                ctx.recheck();
+                return;
+            }
             // The terminal starts at the size the details give it, so showing them resizes nothing.
             let terminal = split(area, ctx.settings.terminal()).1;
             self.size = (terminal.height, terminal.width);
@@ -979,6 +1057,9 @@ impl Page for RunPage {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<(&'static str, Does)> {
+        if self.verifying.is_some() {
+            return vec![("esc", Does::Back)];
+        }
         let details = if self.details {
             Does::Compact
         } else {
@@ -1026,6 +1107,13 @@ impl Page for RunPage {
     }
 
     fn key(&mut self, key: Key, ctx: &mut Ctx) -> Flow {
+        if self.verifying.is_some() {
+            return match key.nav(false) {
+                Some(Nav::Back) => Flow::Pop,
+                Some(Nav::Quit) => Flow::Quit,
+                _ => Flow::Stay,
+            };
+        }
         if let Some(list) = self.cancel.as_mut() {
             match list.key(key) {
                 Picked::Open(yes) => {
@@ -1205,7 +1293,9 @@ impl Page for RunPage {
     /// Done, the page the action was chosen on has nothing left to show. After a failure it
     /// stays for another try.
     fn closes_below(&self) -> bool {
-        matches!(self.outcome, Some((Ok(()), _)))
+        let partial_upgrade = self.job.op == op::UPGRADE_RUN
+            && self.job.args.first().is_some_and(|mode| mode != "guarded");
+        !partial_upgrade && matches!(self.outcome, Some((Ok(()), _)))
     }
 }
 

@@ -44,6 +44,8 @@ pub struct Run {
     /// The script handed the terminal to the person, as an AUR helper's review needs, until it
     /// takes it back. Every prompt is typed meanwhile.
     pub handed: bool,
+    /// The terminal can return to the runtime before the helper's last output reaches it.
+    was_handed: bool,
     /// The person said no to the program holding the terminal, which then ends as if it failed.
     declined: bool,
     fail: Option<String>,
@@ -109,6 +111,7 @@ impl Run {
             tried: false,
             verbose: false,
             handed: false,
+            was_handed: false,
             declined: false,
             fail: None,
             exit: None,
@@ -159,6 +162,7 @@ impl Run {
                     self.tried = false;
                 } else if let Some(state) = line.strip_prefix("terminal\t") {
                     self.handed = state == "on";
+                    self.was_handed |= self.handed;
                 } else if let Some(item) = line.strip_prefix("found\t") {
                     self.found.push(item.to_string());
                 } else if line.starts_with("fail\t") && self.fail.is_none() {
@@ -258,6 +262,11 @@ impl Run {
             self.rejected = false;
             self.tried = true;
         } else {
+            if matches!(self.prompt, Some(Prompt::YesNo { yes: true, .. }))
+                && text.eq_ignore_ascii_case("n")
+            {
+                self.declined = true;
+            }
             crate::info!("{}: answered {text:?} to {line:?}", self.op);
         }
         self.send(text, line);
@@ -356,8 +365,9 @@ impl Run {
             tail.push(current);
         }
         let mut failure = Failure::classify(self.op, Some(code), self.fail.as_deref(), tail);
-        if self.declined
-            && let Some(text) = super::meta(self.op.script).declined.get(&code)
+        if let Some(text) = super::meta(self.op.script).declined.get(&code)
+            && (self.declined
+                || self.was_handed && failure.tail.iter().any(|s| prompt::declined(s)))
         {
             failure.known = Some(text.as_str());
         }
@@ -431,6 +441,26 @@ mod tests {
             "AUR update failed"
         );
         assert_eq!(known(true, no, 13), "AUR unreachable");
+        assert_eq!(known(true, no, 22), "AUR update canceled");
+        assert_eq!(known(false, "", 22), "Selected AUR updates failed");
+    }
+
+    #[test]
+    fn selected_helper_reports_declines_in_a_dialog_or_buffered_terminal_output() {
+        for handed in [false, true] {
+            let mut run = Run::fed(crate::script::op::UPGRADE_RUN, "aur", "");
+            if handed {
+                run.on_event(Event::Script("terminal\ton".into()));
+                run.on_event(Event::Script("terminal\toff".into()));
+                run.on_event(Event::Output(b"Proceed to review? [Y/n]: n\r\n".to_vec()));
+            } else {
+                run.on_event(Event::Output(b"Proceed to review? [Y/n] ".to_vec()));
+                run.answer("n");
+            }
+            run.exit = Some((22, Instant::now() - SETTLE));
+            let failure = run.result().unwrap().unwrap_err();
+            assert_eq!(failure.headline(), "AUR update canceled");
+        }
     }
 
     /// While the script hands over, no question is answered for the person. Once it takes the

@@ -1,5 +1,7 @@
 //! What an update would bring, the news to read first, and the update itself.
 
+mod screening;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
@@ -21,6 +23,16 @@ pub struct UpgradePage {
     /// The box that narrows the updates to the names holding its text, and what it lets through,
     /// in a view of its own without the actions, so enter starts no update.
     filter: Option<(Input, Detail)>,
+}
+
+/// When the inventory is unavailable, a remembered block still rules out the
+/// unrestricted upgrade. With a fresh inventory only affected candidates need screening.
+fn screened_update(ctx: &Ctx) -> bool {
+    ctx.settings.aur_screening
+        || ctx.shared.updates.ready().map_or_else(
+            || ctx.state.has_malicious(),
+            |p| ctx.state.blocks_pending(p),
+        )
 }
 
 impl UpgradePage {
@@ -105,6 +117,19 @@ impl UpgradePage {
                 body.extend(sections(ctx, ""));
             }
         }
+        if !ctx.settings.aur_screening
+            && ctx.shared.updates.ready().is_some_and(|p| {
+                ctx.state.blocks_pending(p)
+                    && p.updates.iter().any(|u| {
+                        u.source == Source::Aur && !ctx.state.is_malicious(&u.name, &u.new)
+                    })
+            })
+        {
+            body.push(Block::Text(
+                t("Enable AUR update screening to select other AUR updates.").into(),
+                Tone::Warn,
+            ));
+        }
         let mut acts = Vec::new();
         if news > 0 {
             acts.push(
@@ -117,13 +142,35 @@ impl UpgradePage {
         }
         if known_current {
             acts.push(recheck(ctx));
+        } else if screened_update(ctx) {
+            acts.extend(screening::actions(ctx));
         } else {
             acts.push(
                 Act::new(t("Install now"), |ctx: &mut Ctx| {
-                    Flow::Push(start(Job::new(op::UPGRADE_RUN, Vec::new()), ctx))
+                    if screened_update(ctx) {
+                        return Flow::Stay;
+                    }
+                    let job = if ctx.state.has_malicious() {
+                        let Some(p) = ctx.shared.updates.ready() else {
+                            return Flow::Stay;
+                        };
+                        let candidates = p
+                            .updates
+                            .iter()
+                            .filter(|u| u.source == Source::Aur)
+                            .map(|u| (u.name.clone(), u.new.clone()))
+                            .collect();
+                        Job::guarded(candidates)
+                    } else {
+                        Job::new(op::UPGRADE_RUN, Vec::new())
+                    };
+                    Flow::Push(start(job, ctx))
                 })
                 .icon(icon::UPDATE),
             );
+            if ctx.state.has_malicious() {
+                acts.extend(screening::system_action(ctx));
+            }
         }
         self.detail.set(body, acts);
         if !self.focused {
@@ -205,7 +252,8 @@ impl Page for UpgradePage {
     }
 
     fn animating(&self, ctx: &Ctx) -> bool {
-        matches!(ctx.shared.updates, Loaded::Loading) || ctx.checking()
+        matches!(ctx.shared.updates, Loaded::Loading)
+            || (ctx.checking() && !ctx.shared.updates.ready().is_some_and(|p| p.screening))
     }
 }
 
@@ -226,35 +274,84 @@ fn sections(ctx: &Ctx, query: &str) -> Vec<Block> {
         (Source::Aur, "AUR", icon::ARCH),
         (Source::Flatpak, "Flatpak", icon::APP),
     ] {
-        let part: Vec<_> = list
+        let visible: Vec<_> = list
             .iter()
-            .zip(&change)
-            .zip(&shown)
-            .filter(|((u, _), label)| {
-                u.source == source
-                    && [&u.name, *label]
+            .enumerate()
+            .filter_map(|(i, u)| {
+                (u.source == source
+                    && [&u.name, &shown[i]]
                         .iter()
-                        .any(|s| s.to_lowercase().contains(query))
+                        .any(|s| s.to_lowercase().contains(query)))
+                .then_some(i)
             })
             .collect();
-        if part.is_empty() {
+        if visible.is_empty() {
             continue;
         }
-        body.push(Block::Styled(vec![vec![
-            (heading.to_string(), Tone::Normal, true),
-            (format!(" ({})", part.len()), Tone::Muted, false),
-        ]]));
-        for ((_, change), label) in part {
-            let (was, becomes) = change.clone();
-            body.push(Block::Row(
-                Lead::Icon(glyph, Tone::Muted),
-                vec![(label.clone(), Tone::Normal)],
-                vec![(was, Tone::Muted), (becomes, Tone::Accent)],
-            ));
+        if source == Source::Aur && screened_update(ctx) {
+            body.push(Block::Heading("AUR".into()));
+            if pending.screening {
+                body.push(Block::Text(
+                    t("Checking AUR scan sources").into(),
+                    Tone::Muted,
+                ));
+            }
+            for (group, packages) in screening::groups(ctx, pending, visible) {
+                if let Some((category, policy)) = group {
+                    body.push(Block::Styled(vec![vec![
+                        (
+                            ctx.style.glyphs.dot.into(),
+                            Tone::Screening(category),
+                            false,
+                        ),
+                        (
+                            format!(" {}", screening::heading(category, policy)),
+                            Tone::Normal,
+                            true,
+                        ),
+                        (format!(" ({})", packages.len()), Tone::Muted, false),
+                    ]]));
+                }
+                for i in packages {
+                    let prefix = if ctx.style.glyphs.icons {
+                        format!("  {glyph}  ")
+                    } else {
+                        "  ".into()
+                    };
+                    let mut label = vec![(prefix, Tone::Muted), (shown[i].clone(), Tone::Normal)];
+                    if let Some(status) = screening::decision_label(ctx, pending, &list[i]) {
+                        label.push((format!(" ({status})"), Tone::Muted));
+                    }
+                    body.push(update_row(Lead::None, label, &change[i]));
+                }
+            }
+        } else {
+            body.push(Block::Styled(vec![vec![
+                (heading.to_string(), Tone::Normal, true),
+                (format!(" ({})", visible.len()), Tone::Muted, false),
+            ]]));
+            for i in visible {
+                body.push(update_row(
+                    Lead::Icon(glyph, Tone::Muted),
+                    vec![(shown[i].clone(), Tone::Normal)],
+                    &change[i],
+                ));
+            }
         }
         body.push(Block::Blank);
     }
     body
+}
+
+fn update_row(lead: Lead, label: Vec<(String, Tone)>, change: &(String, String)) -> Block {
+    Block::Row(
+        lead,
+        label,
+        vec![
+            (change.0.clone(), Tone::Muted),
+            (change.1.clone(), Tone::Accent),
+        ],
+    )
 }
 
 /// What each row shows: a package by its name, a Flatpak by the name Flatpak shows, with its
